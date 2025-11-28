@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include <minwindef.h>
 #include <string>
@@ -107,12 +108,36 @@ namespace Himax {
             }
             return HalInternal::Spi_SetTimeOut(m_handle, milisecond);
         }
-
-        bool WriteRegister(uint8_t cmd, uint8_t* addr, uint8_t *data, uint32_t len) {
+        
+        bool WriteRegister(uint32_t addr, uint8_t *data, uint32_t dataLen) {
             if (m_type == DeviceType::Interrupt) {
                 return false;
             }
-            return HalInternal::Spi_WriteBus(m_handle, m_writeOp, cmd, addr, data, len);
+            if (addr <= 0xFF) {
+                uint8_t cmd = (uint8_t)addr;
+                return HalInternal::Spi_WriteBus(m_handle, m_writeOp, cmd, nullptr, data, dataLen);
+            } else {
+                if (dataLen <= /*Chunk Size*/ 0x1000) {
+                    return HalInternal::Spi_WriteBus(m_handle, m_writeOp, 0x00, (uint8_t*)&addr, data, dataLen);
+                }
+                uint32_t remaining = dataLen;
+                uint32_t offset = 0;
+                uint32_t currenAddr = addr;
+
+                while (remaining > 0) {
+                    uint32_t thisLen = (remaining > 0x1000) ? 0x1000 : remaining;
+
+                    if (!HalInternal::Spi_WriteBus(m_handle, m_writeOp, 0x00, (uint8_t*)&currenAddr, data+offset, thisLen)) {
+                        return false;
+                    }
+
+                    remaining -= thisLen;
+                    offset += thisLen;
+                    currenAddr += thisLen;
+                }
+                return true;
+            }
+            
         }
 
         bool ReadRegister(uint8_t cmd, uint8_t* data, uint32_t len) {

@@ -113,8 +113,8 @@ class InternalSpiDevice {
             bool result = false;
             for (int cnt = 0; cnt < MAX_RETRY; cnt++) {
                 result = SyncIoOperation([&](OVERLAPPED* pov, LPDWORD pBytes) {
-                    return DeviceIoControl(m_handle, code, (LPVOID)in, inLen, out, outLen, NULL, pov);
-                });
+                    return DeviceIoControl(m_handle, code, (LPVOID)in, inLen, out, outLen, pBytes, pov);
+                }, 0, false, (DWORD*)retLen);
                 if (result) break;
             }
 
@@ -123,7 +123,7 @@ class InternalSpiDevice {
 
         bool Read(void* buffer, uint32_t len) {
             return SyncIoOperation([&](OVERLAPPED* pov, LPDWORD pBytes){
-                return ReadFile(m_handle, buffer, len, NULL, pov);
+                return ReadFile(m_handle, buffer, len, pBytes, pov);
             });
         }
 
@@ -162,13 +162,12 @@ class InternalSpiDevice {
             return res;
         }
 
-        bool ReadBus(uint8_t opCode, uint8_t cmd, uint8_t* data, uint8_t len) {
+        bool ReadBus(uint8_t opCode, uint8_t cmd, uint8_t* data, uint32_t len) {
             std::lock_guard<std::recursive_mutex> lock(m_mutex);
             bool res = false;
             size_t total_size = data_offset + len;
 
             m_xfer_buffer.clear();
-            m_xfer_buffer.reserve(total_size);
 
             m_xfer_buffer.push_back(opCode);
             m_xfer_buffer.push_back(cmd);
@@ -179,7 +178,7 @@ class InternalSpiDevice {
             uint32_t retLen = 0;
             res = Ioctl(SPI_IOCTL_FULL_DUPLEX, 
                              m_xfer_buffer.data(), m_xfer_buffer.size(), 
-                             m_xfer_buffer.data(), m_xfer_buffer.max_size(), 
+                             m_xfer_buffer.data(), m_xfer_buffer.size(), 
                              &retLen);
             
             if (res) {
@@ -191,7 +190,7 @@ class InternalSpiDevice {
             return res;
         }
 
-        bool WriteBus(uint8_t opCode, uint8_t cmd, uint8_t* addr, uint8_t* data, uint8_t len) {
+        bool WriteBus(uint8_t opCode, uint8_t cmd, uint8_t* addr, uint8_t* data, uint32_t len) {
             std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
             m_xfer_buffer.clear();
@@ -208,93 +207,104 @@ class InternalSpiDevice {
             }
 
             return SyncIoOperation([&](OVERLAPPED* pov, LPDWORD pBytes){
-                return WriteFile(m_handle, m_xfer_buffer.data(), (DWORD)m_xfer_buffer.size(), NULL, pov);
+                return WriteFile(m_handle, m_xfer_buffer.data(), (DWORD)m_xfer_buffer.size(), pBytes, pov);
             });
         }
 
-        bool GetFrame(SPI_HANDLE handle, void* buffer, uint32_t outLen, uint32_t *retLen){
-            return SyncIoOperation([&](OVERLAPPED* pov, LPDWORD pBytes) {
-                return Ioctl(SPI_IOCTL_GET_FRAME, NULL, 0, buffer, outLen, retLen)    ;
-            });
+        bool ReadAcpi(uint8_t* data, uint32_t len) {
+            std::lock_guard<std::recursive_mutex> lock(m_mutex);
+            bool res = false;
+            m_xfer_buffer.clear();
+            
+            uint32_t retLen = 0;
+
+            res =  Ioctl(SPI_IOCTL_READ_ACPI, nullptr, 0, m_xfer_buffer.data(), len, &retLen);
+            if (res) {
+                if (retLen >= len) {
+                    memcpy(data, m_xfer_buffer.data(), len);
+                }
+            }
+            return res;
         }
 
-        bool SetTimeOut(SPI_HANDLE handle, uint8_t milisecond) {
+        bool GetFrame(void* buffer, uint32_t outLen, uint32_t *retLen){
+            return Ioctl(SPI_IOCTL_GET_FRAME, NULL, 0, buffer, outLen, retLen);
+        }
+
+        bool SetTimeOut(uint8_t milisecond) {
             std::lock_guard<std::recursive_mutex> lock(m_mutex);
             *reinterpret_cast<uint32_t*>(m_xfer_buffer.data()) = static_cast<uint32_t>(milisecond);
-            return SyncIoOperation([&](OVERLAPPED* pov, LPDWORD pBytes) {
-                return Ioctl(SPI_IOCTL_SET_TIMEOUT, m_xfer_buffer.data(), 4, NULL, 0, NULL);
-            });
+            return Ioctl(SPI_IOCTL_SET_TIMEOUT, m_xfer_buffer.data(), 4, NULL, 0, NULL);
         }
 
-        bool SetBlock(SPI_HANDLE handle, bool status) {
+        bool SetBlock(bool status) {
             std::lock_guard<std::recursive_mutex> lock(m_mutex);
             *reinterpret_cast<uint32_t*>(m_xfer_buffer.data()) = static_cast<uint32_t>((uint8_t) status);
-            return SyncIoOperation([&](OVERLAPPED* pov, LPDWORD pBytes) {
-                return Ioctl(SPI_IOCTL_SET_BLOCK, m_xfer_buffer.data(), 4, NULL, 0, NULL);
-            });            
+            return Ioctl(SPI_IOCTL_SET_BLOCK, m_xfer_buffer.data(), 4, NULL, 0, NULL);          
         }
 
-        bool SetReset(SPI_HANDLE handle) {
+        bool SetReset() {
             std::lock_guard<std::recursive_mutex> lock(m_mutex);
             *reinterpret_cast<uint32_t*>(m_xfer_buffer.data()) = static_cast<uint32_t>(0);
-            return SyncIoOperation([&](OVERLAPPED* pov, LPDWORD pBytes) {
-                return Ioctl(SPI_IOCTL_SET_RESET, m_xfer_buffer.data(), 4, NULL, 0, NULL);
-            });  
+            return Ioctl(SPI_IOCTL_SET_RESET, m_xfer_buffer.data(), 4, NULL, 0, NULL);  
         }
 };
 
 
 namespace Himax {
-namespace HalInternal {
-    /*--- 导出函数 ---*/
-    SPI_HANDLE Spi_Open(const wchar_t* path) {
-        return (SPI_HANDLE)new (std::nothrow) ::InternalSpiDevice(path); 
-    }
-    
-    void Spi_Close(SPI_HANDLE handle) {
-        if (handle) {
-            delete (::InternalSpiDevice*)handle;
+    namespace HalInternal {
+        /*--- 导出函数 ---*/
+        SPI_HANDLE Spi_Open(const wchar_t* path) {
+            return (SPI_HANDLE)new (std::nothrow) ::InternalSpiDevice(path); 
+        }
+        
+        void Spi_Close(SPI_HANDLE handle) {
+            if (handle) {
+                delete (::InternalSpiDevice*)handle;
+            }
+        }
+        
+        bool Spi_IsOpen(SPI_HANDLE handle){
+            return (handle &&((::InternalSpiDevice*)handle)->IsValid() ? 1 : 0);
+        }
+        
+        int Spi_IntOpen(SPI_HANDLE handle) { 
+            return (handle && ((::InternalSpiDevice*)handle)->Ioctl(SPI_IOCTL_INT_OPEN, NULL, 0, NULL, 0, NULL)) ? 1 : 0; 
+        }
+        int Spi_IntClose(SPI_HANDLE handle) { 
+            return (handle && ((::InternalSpiDevice*)handle)->Ioctl(SPI_IOCTL_INT_CLOSE, NULL, 0, NULL, 0, NULL)) ? 1 : 0; 
+        }
+        
+        int Spi_ReadBus(SPI_HANDLE handle, uint8_t opCode, uint8_t cmd, uint8_t*data, uint8_t len) {
+            return (handle && ((::InternalSpiDevice*)handle)->ReadBus(opCode, cmd, data, len)) ? 1 : 0;
+        }
+        
+        int Spi_WriteBus(SPI_HANDLE handle, uint8_t opCode, uint8_t cmd, uint8_t* addr, uint8_t* data, uint8_t len) {
+            return (handle && ((::InternalSpiDevice*)handle)->WriteBus(opCode, cmd, addr, data, len)) ? 1 : 0;
+        }
+        
+        int Spi_WaitInterrupt(SPI_HANDLE handle) {
+            return (handle && ((::InternalSpiDevice*)handle)->WaitInterrupt()) ? 1 : 0;
+        }
+        
+        int Spi_GetFrame(SPI_HANDLE handle, void* buffer, uint32_t len, uint32_t* retLen) {
+            return (handle && ((::InternalSpiDevice*)handle)->GetFrame(buffer, len, retLen)) ? 1 : 0;
+        }
+        
+        int Spi_SetTimeOut(SPI_HANDLE handle, uint8_t milisecond) {
+            return (handle && ((::InternalSpiDevice*)handle)->SetTimeOut(milisecond)) ? 1 : 0;
+        }
+        
+        int Spi_SetBlock(SPI_HANDLE handle, bool status) {
+            return (handle && ((::InternalSpiDevice*)handle)->SetBlock(status)) ? 1 : 0;
+        }
+        
+        int Spi_SetReset(SPI_HANDLE handle) {
+            return (handle && ((::InternalSpiDevice*)handle)->SetReset()) ? 1 : 0;
+        }
+
+        int Spi_ReadAcpi(SPI_HANDLE handle, uint8_t* buffer, uint32_t len) {
+            return (handle && ((::InternalSpiDevice*)handle)->ReadAcpi(buffer, len));
         }
     }
-    
-    bool Spi_IsOpen(SPI_HANDLE handle){
-        return (handle &&((::InternalSpiDevice*)handle)->IsValid() ? 1 : 0);
-    }
-    
-    int Spi_IntOpen(SPI_HANDLE handle) { 
-        return (handle && ((::InternalSpiDevice*)handle)->Ioctl(SPI_IOCTL_INT_OPEN, NULL, 0, NULL, 0, NULL)) ? 1 : 0; 
-    }
-    int Spi_IntClose(SPI_HANDLE handle) { 
-        return (handle && ((::InternalSpiDevice*)handle)->Ioctl(SPI_IOCTL_INT_CLOSE, NULL, 0, NULL, 0, NULL)) ? 1 : 0; 
-    }
-    
-    int Spi_ReadBus(SPI_HANDLE handle, uint8_t opCode, uint8_t cmd, uint8_t*data, uint8_t len) {
-        return (handle && ((::InternalSpiDevice*)handle)->ReadBus(opCode, cmd, data, len)) ? 1 : 0;
-    }
-    
-    int Spi_WriteBus(SPI_HANDLE handle, uint8_t opCode, uint8_t cmd, uint8_t* addr, uint8_t* data, uint8_t len) {
-        return (handle && ((::InternalSpiDevice*)handle)->WriteBus(opCode, cmd, addr, data, len)) ? 1 : 0;
-    }
-    
-    int Spi_WaitInterrupt(SPI_HANDLE handle) {
-        return (handle && ((::InternalSpiDevice*)handle)->WaitInterrupt()) ? 1 : 0;
-    }
-    
-    int Spi_GetFrame(SPI_HANDLE handle, void* buffer, uint32_t len, uint32_t* retLen) {
-        return (handle && ((::InternalSpiDevice*)handle)->GetFrame(handle, buffer, len, retLen)) ? 1 : 0;
-    }
-    
-    int Spi_SetTimeOut(SPI_HANDLE handle, uint8_t milisecond) {
-        return (handle && ((::InternalSpiDevice*)handle)->SetTimeOut(handle, milisecond)) ? 1 : 0;
-    }
-    
-    int Spi_SetBlock(SPI_HANDLE handle, bool status) {
-        return (handle && ((::InternalSpiDevice*)handle)->SetBlock(handle, status)) ? 1 : 0;
-    }
-    
-    int Spi_SetReset(SPI_HANDLE handle) {
-        return (handle && ((::InternalSpiDevice*)handle)->SetReset(handle)) ? 1 : 0;
-    }
-
-}
 }
