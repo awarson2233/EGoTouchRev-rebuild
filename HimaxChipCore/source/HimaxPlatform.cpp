@@ -190,24 +190,15 @@ class InternalSpiDevice {
             return res;
         }
 
-        bool WriteBus(uint8_t opCode, uint8_t cmd, uint8_t* addr, uint8_t* data, uint32_t len) {
+        bool WriteBus(const uint8_t opCode, const uint8_t* payload, const uint32_t pLen) {
             std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
             m_xfer_buffer.clear();
             m_xfer_buffer.push_back(opCode);
-            m_xfer_buffer.push_back(cmd);
-            if (addr) {
-                m_xfer_buffer.push_back(addr[0]);
-                m_xfer_buffer.push_back(addr[1]);
-                m_xfer_buffer.push_back(addr[2]);
-                m_xfer_buffer.push_back(addr[3]);
-            }
-            if (data) {
-                m_xfer_buffer.insert(m_xfer_buffer.end(), data, data + len);
-            }
+            m_xfer_buffer.insert(m_xfer_buffer.end(), payload, payload + pLen);
 
             return SyncIoOperation([&](OVERLAPPED* pov, LPDWORD pBytes){
-                return WriteFile(m_handle, m_xfer_buffer.data(), (DWORD)m_xfer_buffer.size(), pBytes, pov);
+                return WriteFile(m_handle, m_xfer_buffer.data(), (DWORD)m_xfer_buffer.size(), NULL, pov);
             });
         }
 
@@ -279,8 +270,8 @@ namespace Himax {
             return (handle && ((::InternalSpiDevice*)handle)->ReadBus(opCode, cmd, data, len)) ? 1 : 0;
         }
         
-        int Spi_WriteBus(SPI_HANDLE handle, uint8_t opCode, uint8_t cmd, uint8_t* addr, uint8_t* data, uint8_t len) {
-            return (handle && ((::InternalSpiDevice*)handle)->WriteBus(opCode, cmd, addr, data, len)) ? 1 : 0;
+        int Spi_WriteBus(SPI_HANDLE handle, uint8_t opCode, const uint8_t* payload, const uint32_t pLen) {
+            return (handle && ((::InternalSpiDevice*)handle)->WriteBus(opCode, payload, pLen)) ? 1 : 0;
         }
         
         int Spi_WaitInterrupt(SPI_HANDLE handle) {

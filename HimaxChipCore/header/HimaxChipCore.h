@@ -1,5 +1,8 @@
 #pragma once
 #include "HimaxPlatform.h"
+#include <cstdint>
+#include <minwindef.h>
+#include <winnt.h>
 
 namespace Himax {
     class Control {
@@ -9,9 +12,12 @@ namespace Himax {
         HalDevice* m_pInterrupt;
     
     public:
-        Control(HalDevice* pMaster, HalDevice* pSlave, HalDevice* pInt);
+        Control(HalDevice* pMaster, HalDevice *pSlave, HalDevice* pInt);
 
-        bool CheckBusReady();
-        bool BurstModeEnable();
+        bool CheckBusReady(void);
+        bool addrIncUnitSetRaw_int(void);
+        bool BurstModeEnable(int sign);
+        bool wrAddrAutoincSetRaw_intf(int sign);
+        bool safeModeSetRaw_intf(int enable, uint8_t DevID);
     };
 }

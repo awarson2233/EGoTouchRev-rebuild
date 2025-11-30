@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <minwindef.h>
 #include <string>
+#include <vector>
 #include <winnt.h>
 #include <winscard.h>
 
@@ -28,7 +29,7 @@ namespace Himax {
     
         /*** 读写操作 ***/
         int Spi_ReadBus(SPI_HANDLE handle, uint8_t opCode, uint8_t cmd, uint8_t*data,uint8_t len);
-        int Spi_WriteBus(SPI_HANDLE handle, uint8_t opCode, uint8_t cmd, uint8_t* addr, uint8_t* data, uint8_t len);
+        int Spi_WriteBus(SPI_HANDLE handle, uint8_t opCode, const uint8_t* payload, const uint32_t pLen);
         int Spi_GetFrame(SPI_HANDLE handle, void* buffer, uint32_t len, uint32_t* retLen);
         
         /*** 中断操作 ***/
@@ -109,35 +110,23 @@ namespace Himax {
             return HalInternal::Spi_SetTimeOut(m_handle, milisecond);
         }
         
-        bool WriteRegister(uint32_t addr, uint8_t *data, uint32_t dataLen) {
+        bool WriteRegister(const uint8_t* reg, const uint32_t regLen, const uint8_t *data, uint32_t dataLen) {
             if (m_type == DeviceType::Interrupt) {
                 return false;
             }
-            if (addr <= 0xFF) {
-                uint8_t cmd = (uint8_t)addr;
-                return HalInternal::Spi_WriteBus(m_handle, m_writeOp, cmd, nullptr, data, dataLen);
-            } else {
-                if (dataLen <= /*Chunk Size*/ 0x1000) {
-                    return HalInternal::Spi_WriteBus(m_handle, m_writeOp, 0x00, (uint8_t*)&addr, data, dataLen);
-                }
-                uint32_t remaining = dataLen;
-                uint32_t offset = 0;
-                uint32_t currenAddr = addr;
-
-                while (remaining > 0) {
-                    uint32_t thisLen = (remaining > 0x1000) ? 0x1000 : remaining;
-
-                    if (!HalInternal::Spi_WriteBus(m_handle, m_writeOp, 0x00, (uint8_t*)&currenAddr, data+offset, thisLen)) {
-                        return false;
-                    }
-
-                    remaining -= thisLen;
-                    offset += thisLen;
-                    currenAddr += thisLen;
-                }
-                return true;
+            std::vector<uint8_t> payload;
+            payload.clear();
+            if (regLen == 1) {
+                payload.insert(payload.end(), reg, reg + regLen);
+                payload.insert(payload.end(), data, data + dataLen);
+                return HalInternal::Spi_WriteBus(m_handle, m_writeOp, payload.data(), regLen + dataLen);
+            } else if (regLen == 4) {
+                payload.push_back(0);
+                payload.insert(payload.end(), reg, reg + regLen);
+                payload.insert(payload.end(), data, data + dataLen);
+                return HalInternal::Spi_WriteBus(m_handle, m_writeOp, payload.data(), regLen + dataLen + 1);
             }
-            
+            return false; 
         }
 
         bool ReadRegister(uint8_t cmd, uint8_t* data, uint32_t len) {

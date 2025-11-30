@@ -127,14 +127,17 @@ int main(void) {
 	threadA.join();
 	threadB.join();
 	*/
-	
-	g_pSlaveDev->SetBlock(true);
+
+/* 	g_pSlaveDev->SetBlock(true);
 	g_pMasterDev->SetTimeOut(200);
 	g_pSlaveDev->SetTimeOut(200);
-	g_pMasterDev->SetReset();
+	g_pMasterDev->SetReset(); */
 
 	g_pController->CheckBusReady();
+
+	g_pController->safeModeSetRaw_intf(1, 0);
 	// --- 4. 清理 ---
 	std::cout << "Closing handles..." << std::endl;
 	system("pause");
+
 }
