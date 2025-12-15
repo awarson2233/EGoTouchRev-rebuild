@@ -44,7 +44,7 @@ public:
     uint8_t addr_program_reload_from[4];          // 0x00000000
     uint8_t addr_program_reload_to[4];            // 0x08000000
     uint8_t addr_program_reload_page_write[4];    // 0x0000FB00
-    uint8_t addr_raw_out_sel[4];                  // 0x800204B4
+    uint8_t addr_raw_out_sel[4];                  // 0x100072EC
     uint8_t addr_reload_status[4];                // 0x80050000
     uint8_t addr_reload_crc32_result[4];          // 0x80050018
     uint8_t addr_reload_addr_from[4];             // 0x80050020
@@ -297,8 +297,7 @@ public:
     uint8_t addr_rawdata_end[4];                  // 0x00000000
     uint8_t data_conti[4];                        // 0x44332211
     uint8_t data_fin[4];                          // 0x00000000
-    uint8_t passwrd_start[2];                     // 0x5AA5
-    uint8_t passwrd_end[2];                       // 0xA55A
+    uint8_t passwrd[4];                           // 0x00005AA5
 };
 
 class on_driver_operation {
@@ -325,6 +324,8 @@ private:
     std::unique_ptr<HalDevice> m_slave;
     std::unique_ptr<HalDevice> m_interrupt;
 
+    uint32_t hx_mode;
+
     ic_operation        m_ic_op{};
     fw_operation        m_fw_op{};
     flash_operation     m_flash_op{};
@@ -346,19 +347,25 @@ private:
     
     bool hx_hw_reset_ahb_intf(DeviceType type);
     bool hx_sw_reset_ahb_intf(DeviceType type); 
+    bool hx_is_reload_done_ahb(void);
 
     bool hx_set_N_frame(uint8_t nFrame);
-    bool hx_switch_mode(uint8_t mode);
-    
+    bool hx_set_raw_data_type(uint32_t hx_mode, bool state);
+    bool hx_switch_mode(uint32_t mode);
     bool hx_sense_on(bool isHwReset);
-    void thp_afe_start(void);
-    
-    void InitLogFile();
 
+    void thp_afe_stop(void);
+    void InitLogFile();
+    
     std::ofstream m_logFile;
     std::string message;
-public:
+    public:
+    void thp_afe_start(void);
     Chip(const std::wstring& master_path, const std::wstring& slave_path, const std::wstring& interrupt_path);
     bool IsReady(DeviceType type) const;
+
+    bool WaitInterrupt();
+    bool GetMasterData(std::vector<uint8_t>& buffer);
+    bool GetSlaveData(std::vector<uint8_t>& buffer);
 };
 }

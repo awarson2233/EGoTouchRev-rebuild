@@ -85,6 +85,7 @@ Chip::Chip(const std::wstring& master_path, const std::wstring& slave_path, cons
     m_master = std::make_unique<HalDevice>(master_path.c_str(), DeviceType::Master);
     m_slave  = std::make_unique<HalDevice>(slave_path.c_str(), DeviceType::Slave);
     m_interrupt = std::make_unique<HalDevice>(interrupt_path.c_str(), DeviceType::Interrupt);
+    hx_mode = 0x105;
 
     InitLogFile();
 }
@@ -151,7 +152,7 @@ fw_operation InitFwOperation() {
     WriteU32(op.addr_program_reload_from, 0x00000000);
     WriteU32(op.addr_program_reload_to, 0x08000000);
     WriteU32(op.addr_program_reload_page_write, 0x0000FB00);
-    WriteU32(op.addr_raw_out_sel, 0x800204B4);
+    WriteU32(op.addr_raw_out_sel, 0x100072EC);
     WriteU32(op.addr_reload_status, 0x80050000);
     WriteU32(op.addr_reload_crc32_result, 0x80050018);
     WriteU32(op.addr_reload_addr_from, 0x80050020);
@@ -405,8 +406,7 @@ on_sram_operation InitOnSramOperation() {
     WriteU32(op.addr_rawdata_end, 0x00000000);
     WriteU32(op.data_conti, 0x44332211);
     WriteU32(op.data_fin, 0x00000000);
-    WriteU16(op.passwrd_start, 0x5AA5);
-    WriteU16(op.passwrd_end, 0xA55A);
+    WriteU32(op.passwrd, 0x00005AA5);
     return op;
 }
 
@@ -431,14 +431,14 @@ on_driver_operation InitOnDriverOperation() {
     return op;
 }
 
-bool burst_enable(HalDevice* dev, const ic_operation& ic_op, uint8_t state) {
+bool burst_enable(HalDevice* dev, uint8_t state) {
     if (!dev || !dev->IsValid()) return false;
     
     bool res = false;
     uint8_t tmp_data[4];
-    tmp_data[0] = ic_op.data_conti[0];
+    tmp_data[0] = 0x31;
 
-    res = dev->WriteBus(ic_op.addr_conti[0], NULL, tmp_data, 1);
+    res = dev->WriteBus(0x13, NULL, tmp_data, 1);
     if (!res) {
         dev->GetError();
         return false;
@@ -446,7 +446,7 @@ bool burst_enable(HalDevice* dev, const ic_operation& ic_op, uint8_t state) {
 
     tmp_data[0] = (0x12 | state);
 
-    res = dev->WriteBus(ic_op.addr_incr4[0], NULL, tmp_data, 1);
+    res = dev->WriteBus(0x0D, NULL, tmp_data, 1);
     if (!res) {
         dev->GetError();
         return false;
@@ -454,24 +454,29 @@ bool burst_enable(HalDevice* dev, const ic_operation& ic_op, uint8_t state) {
     return res;
 }
 
-bool register_read(HalDevice* dev, const ic_operation& ic_op, const uint8_t* addr, uint8_t* buffer, uint32_t len) {
+bool register_read(HalDevice* dev, const uint8_t* addr, uint8_t* buffer, uint32_t len) {
     if (!dev || !dev->IsValid()) return false;
     bool res  = false;
 
-    res = dev->WriteBus(ic_op.addr_ahb_addr_byte_0[0], addr, NULL, 0);
+    const uint8_t addr_ahb_addr_byte_0 = 0x00;
+    const uint8_t addr_ahb_access_direction = 0x0C;
+    const uint8_t data_ahb_access_direction_read[] = { 0x00 };
+    const uint8_t addr_ahb_rdata_byte_0 = 0x08;
+
+    res = dev->WriteBus(addr_ahb_addr_byte_0, addr, NULL, 0);
     if (!res) {
         dev->GetError();
         return false;
     }
 
-    res = dev->WriteBus(ic_op.addr_ahb_access_direction[0], NULL, 
-        ic_op.data_ahb_access_direction_read, 1);
+    res = dev->WriteBus(addr_ahb_access_direction, NULL, 
+        data_ahb_access_direction_read, 1);
     if (!res) {
         dev->GetError();
         return false;
     }
 
-    res = dev->ReadBus(ic_op.addr_ahb_rdata_byte_0[0], buffer, len);
+    res = dev->ReadBus(addr_ahb_rdata_byte_0, buffer, len);
     if (!res) {
         dev->GetError();
         return false;
@@ -479,19 +484,19 @@ bool register_read(HalDevice* dev, const ic_operation& ic_op, const uint8_t* add
     return res;
 }
 
-bool register_write(HalDevice* dev, const ic_operation& ic_op, const uint8_t* addr, uint8_t* val, uint32_t len) {
+bool register_write(HalDevice* dev, const uint8_t* addr, uint8_t* val, uint32_t len) {
     if (!dev || !dev->IsValid()) return false;
 
     if (len > 4) {
-        burst_enable(dev, ic_op, 1);
+        burst_enable(dev, 1);
     } else {
-        burst_enable(dev, ic_op, 0);
+        burst_enable(dev, 0);
     }
 
-    return dev->WriteBus(ic_op.addr_ahb_addr_byte_0[0], addr, val, len);
+    return dev->WriteBus(0x00, addr, val, len);
 }
 
-bool write_and_verify(HalDevice* dev, const ic_operation& ic_op, const uint8_t* addr, const uint8_t* data, uint32_t len) {
+bool write_and_verify(HalDevice* dev, const uint8_t* addr, const uint8_t* data, uint32_t len, uint32_t verify_len = 0) {
     if (!dev || !dev->IsValid()) return false;
 
     auto to_hex = [](const uint8_t* src, uint32_t size) {
@@ -512,12 +517,19 @@ bool write_and_verify(HalDevice* dev, const ic_operation& ic_op, const uint8_t* 
         return false;
     }
 
-    if (!register_read(dev, ic_op, addr, read_buf.data(), len)) {
+    if (!register_read(dev, addr, read_buf.data(), len)) {
         HIMAX_LOG("bus access failed");
         return false;
     }
 
-    const uint32_t cmp_len = (len >= 2) ? 2u : len;
+    uint32_t cmp_len = verify_len;
+    if (cmp_len == 0) {
+        cmp_len = (len >= 2) ? 2u : len;
+    }
+    if (cmp_len > len) {
+        cmp_len = len;
+    }
+
     if (std::equal(write_buf.begin(), write_buf.begin() + cmp_len, read_buf.begin())) {
         return true;
     }
@@ -529,15 +541,16 @@ bool write_and_verify(HalDevice* dev, const ic_operation& ic_op, const uint8_t* 
     return false;
 }
 
-bool safeModeSetRaw_intf(HalDevice* dev, const ic_operation& ic_op, const bool state) {
+bool safeModeSetRaw_intf(HalDevice* dev, const bool state) {
     if (!dev || !dev->IsValid()) return false;
     uint8_t tmp_data[2]{};
+    const uint8_t adr_i2c_psw_lb = 0x31;
 
     if (state == 1) {
-        tmp_data[0] = ic_op.data_i2c_psw_lb[0];
-        tmp_data[1] = ic_op.data_i2c_psw_ub[0];
-        if (!dev->WriteBus(ic_op.adr_i2c_psw_lb[0], nullptr, tmp_data, 2)) return false;
-        if (!dev->ReadBus(ic_op.adr_i2c_psw_lb[0], tmp_data, 2)) return false;
+        tmp_data[0] = 0x27;
+        tmp_data[1] = 0x95;
+        if (!dev->WriteBus(adr_i2c_psw_lb, nullptr, tmp_data, 2)) return false;
+        if (!dev->ReadBus(adr_i2c_psw_lb, tmp_data, 2)) return false;
 
         const bool ok = (tmp_data[0] == 0x27 && tmp_data[1] == 0x95);
         std::string message = ok
@@ -546,8 +559,8 @@ bool safeModeSetRaw_intf(HalDevice* dev, const ic_operation& ic_op, const bool s
         HIMAX_LOG(message);
         return ok;
     } else {
-        if (!dev->WriteBus(ic_op.adr_i2c_psw_lb[0], nullptr, tmp_data, 2)) return false;
-        if (!dev->ReadBus(ic_op.adr_i2c_psw_lb[0], tmp_data, 2)) return false;
+        if (!dev->WriteBus(adr_i2c_psw_lb, nullptr, tmp_data, 2)) return false;
+        if (!dev->ReadBus(adr_i2c_psw_lb, tmp_data, 2)) return false;
 
         const bool ok = (tmp_data[0] == 0x00 && tmp_data[1] == 0x00);
         std::string message = ok
@@ -608,9 +621,54 @@ bool Chip::init_buffers_and_register(void) {
     std::vector<uint8_t> tmp_data(0x50, 0);
     uint8_t tmp_register[4] = {0x50, 0x75, 0x00, 0x10};
     uint8_t tmp_register2[4] = {0x3c, 0x75, 0x00, 0x10};
-    register_write(m_master.get(), m_ic_op, tmp_register, tmp_data.data(), 0x50);
-    register_write(m_master.get(), m_ic_op, tmp_register2, m_on_fw_op.data_clear, 4);
+    register_write(m_master.get(), tmp_register, tmp_data.data(), 0x50);
+    register_write(m_master.get(), tmp_register2, m_on_fw_op.data_clear, 4);
 
+    return true;
+}
+
+bool Chip::hx_set_raw_data_type(uint32_t mode, bool /*state*/) {
+    std::vector<uint8_t> tmp_data(4, 0);
+    
+    switch (mode) {
+        case 0x100: tmp_data[0] = 0x0B; break;
+        case 0x101:
+        case 0x102: tmp_data[0] = 0x0A; break;
+        case 0x103: tmp_data[0] = 0x0F; break;
+        case 0x105: tmp_data[0] = 0xF6; break;
+        default:    tmp_data[0] = mode; break;
+    }
+
+    bool step_ok = false;
+    for (int i = 0; i < 10; ++i) {
+        if (write_and_verify(m_master.get(), m_fw_op.addr_raw_out_sel, tmp_data.data(), 4, 1)) {
+            step_ok = true;
+            break;
+        }
+    }
+
+    if (!step_ok) {
+        message = std::format("SetRawDataType: Failed to set mode 0x{:02X} to 0x100072EC", tmp_data[0]);
+        HIMAX_LOG(message);
+        return false;
+    }
+
+    step_ok = false;
+    for (int i = 0; i < 10; ++i) {
+        // 修正：passwrd 长度为 2 字节
+        if (register_write(m_master.get(), m_sram_op.addr_rawdata_addr, m_on_sram_op.passwrd, 4)) {
+            step_ok = true;
+            break;
+        }
+        Sleep(1);
+    }
+
+    if (!step_ok) {
+        HIMAX_LOG("Failed to write SRAM password (0x5AA5)");
+    }
+
+    message = std::format("set raw data out select: 0x{:02X}", mode);
+    HIMAX_LOG(message);
     return true;
 }
 
@@ -635,7 +693,7 @@ bool Chip::hx_hw_reset_ahb_intf(DeviceType type) {
     if (!step_ok) HIMAX_LOG("SetReset(1) failed");
     res = res && step_ok;
 
-    step_ok = burst_enable(dev, m_ic_op, 1);
+    step_ok = burst_enable(dev, 1);
     if (!step_ok) HIMAX_LOG("burst_enable set to 1 failed");
     res = res && step_ok;
 
@@ -649,7 +707,7 @@ bool Chip::hx_sw_reset_ahb_intf(DeviceType type) {
     // 尝试5次进入safe mode，每次尝试sleep(10)
     bool safe_mode_ok = false;
     for (int i = 0; i < 5; ++i) {
-        if (safeModeSetRaw_intf(dev, m_ic_op, true)) {
+        if (safeModeSetRaw_intf(dev, true)) {
             safe_mode_ok = true;
             break;
         }
@@ -664,7 +722,7 @@ bool Chip::hx_sw_reset_ahb_intf(DeviceType type) {
     Sleep(10);
 
     // 清空addr_fw_define_2nd_flash_reload，不尝试，失败输出clean reload done failed!，立即返回
-    if (!register_write(dev, m_ic_op, m_driver_op.addr_fw_define_2nd_flash_reload, m_driver_op.data_fw_define_flash_reload_en, 4)) {
+    if (!register_write(dev, m_driver_op.addr_fw_define_2nd_flash_reload, m_driver_op.data_fw_define_flash_reload_en, 4)) {
         HIMAX_LOG("clean reload done failed!");
         return false;
     }
@@ -672,14 +730,14 @@ bool Chip::hx_sw_reset_ahb_intf(DeviceType type) {
     Sleep(10);
 
     // addr_system_reset，不尝试，失败直接返回"Failed to write System Reset command"
-    if (!register_write(dev, m_ic_op, m_fw_op.addr_system_reset, m_fw_op.data_system_reset, 4)) {
+    if (!register_write(dev, m_fw_op.addr_system_reset, m_fw_op.data_system_reset, 4)) {
         HIMAX_LOG("Failed to write System Reset command");
         return false;
     }
 
     Sleep(100);
     
-    burst_enable(dev, m_ic_op, 1);
+    burst_enable(dev, 1);
 
     return true;
 }
@@ -697,7 +755,7 @@ bool Chip::hx_reload_set(uint8_t state) {
     HIMAX_LOG(message);
 
     for (int attempt = 0; attempt < 9; ++attempt) {
-        res = write_and_verify(m_master.get(), m_ic_op, m_driver_op.addr_fw_define_flash_reload, tmp_data, 4);
+        res = write_and_verify(m_master.get(), m_driver_op.addr_fw_define_flash_reload, tmp_data, 4);
         if (res) break;
     }
 
@@ -722,20 +780,20 @@ bool Chip::hx_set_N_frame(uint8_t nFrame) {
     };
 
     pack32(target1);
-    if (!write_and_verify(m_master.get(), m_ic_op, m_fw_op.addr_set_frame_addr, tmp_data.data(), 4)) return false;
+    if (!write_and_verify(m_master.get(), m_fw_op.addr_set_frame_addr, tmp_data.data(), 4)) return false;
 
     pack32(target2);
-    if (!write_and_verify(m_master.get(), m_ic_op, m_fw_op.addr_set_frame_addr, tmp_data.data(), 4)) return false;
+    if (!write_and_verify(m_master.get(), m_fw_op.addr_set_frame_addr, tmp_data.data(), 4)) return false;
     return true;
 }
 
-bool Chip::hx_switch_mode(uint8_t mode) {
+bool Chip::hx_switch_mode(uint32_t mode) {
     constexpr int kUnlockAttempts = 20;
     constexpr int kWriteAttempts = 20;
 
     bool unlocked = false;
     for (int attempt = 0; attempt < kUnlockAttempts && !unlocked; ++attempt) {
-        unlocked = write_and_verify(m_master.get(), m_ic_op, m_sram_op.addr_rawdata_addr, m_sram_op.passwrd, 2);
+        unlocked = write_and_verify(m_master.get(), m_sram_op.addr_rawdata_addr, m_sram_op.passwrd, 2);
     }
     if (!unlocked) {
         message = std::format("switch mode unlock failed after {} attempts", kUnlockAttempts);
@@ -746,16 +804,16 @@ bool Chip::hx_switch_mode(uint8_t mode) {
     uint8_t tmp_data[4]{};
     const uint8_t* src = nullptr;
     switch (mode) {
-    case 0x00: // normal
+    case 0x100: // normal
         src = m_fw_op.data_normal_mode;
         break;
-    case 0x01: // open
+    case 0x101: // open
         src = m_fw_op.data_open_mode;
         break;
-    case 0x02: // short
+    case 0x102: // short
         src = m_fw_op.data_short_mode;
         break;
-    case 0x03: // sorting
+    case 0x103: // sorting
         src = m_fw_op.data_sorting_mode;
         break;
     default:
@@ -777,7 +835,7 @@ bool Chip::hx_switch_mode(uint8_t mode) {
 
     bool wrote = false;
     for (int attempt = 0; attempt < kWriteAttempts && !wrote; ++attempt) {
-        wrote = write_and_verify(m_master.get(), m_ic_op, m_fw_op.addr_sorting_mode_en, tmp_data, 4);
+        wrote = write_and_verify(m_master.get(), m_fw_op.addr_sorting_mode_en, tmp_data, 4);
     }
 
     if (wrote) {
@@ -789,12 +847,22 @@ bool Chip::hx_switch_mode(uint8_t mode) {
     return wrote;
 }
 
+bool Chip::hx_is_reload_done_ahb(void) {
+    std::vector<uint8_t> tmp_data(4, 0);
+    bool step = register_read(m_master.get(), m_driver_op.addr_fw_define_2nd_flash_reload, tmp_data.data(), 4);
+    if (step && tmp_data[0] == 0xC0 && tmp_data[1] == 0x72) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
 bool Chip::hx_sense_on(bool isHwReset) {
     message = std::format("hx_sense_on: isHwReset = {}", isHwReset);
     HIMAX_LOG(message);
 
     // 1. 尝试进入 Safe Mode (Sense Off)
-    if (!safeModeSetRaw_intf(m_master.get(), m_ic_op, true)) {
+    if (!safeModeSetRaw_intf(m_master.get(), true)) {
         message = "safeModeSetRaw(true) failed";
         HIMAX_LOG(message);
         // 如果失败，尝试硬件复位救活
@@ -805,44 +873,65 @@ bool Chip::hx_sense_on(bool isHwReset) {
     }
 
     // 2. 配置参数
-    uint8_t data_buf[4] = {0};
-
-    // 0x10007294 = 0x00000001 (Set Frame)
-    WriteU32(data_buf, 1);
-    if (!register_write(m_master.get(), m_ic_op, m_fw_op.addr_set_frame_addr, data_buf, 4)) {
-        HIMAX_LOG("Failed to write addr_set_frame_addr");
+    std::vector<uint8_t> tmp_data(4, 0);
+    bool step_ok = hx_set_N_frame(1);
+    if (!step_ok) {
+        message = std::format("hx_set_N_frame(1) failed!");
     }
 
-    // 0x10007F00 = 0x00000000 (Enable Flash Reload)
-    WriteU32(data_buf, 0);
-    if (!register_write(m_master.get(), m_ic_op, m_driver_op.addr_fw_define_flash_reload, data_buf, 4)) {
-        HIMAX_LOG("Failed to write addr_fw_define_flash_reload");
+    step_ok = hx_reload_set(0);
+    if (!step_ok) {
+        message = std::format("hx_reload_set (false) failed");
     }
+    //hx_mode待找出,还要添加试错和sleep
+    step_ok = hx_switch_mode(hx_mode);
 
-    // 0x10007F04 = 0x00000000 (Set Normal Mode)
-    WriteU32(data_buf, 0);
-    if (!register_write(m_master.get(), m_ic_op, m_fw_op.addr_sorting_mode_en, data_buf, 4)) {
-        HIMAX_LOG("Failed to write addr_sorting_mode_en");
-    }
-
-    // 3. 执行复位
-    if (isHwReset) {
-        hx_hw_reset_ahb_intf(DeviceType::Master);
-    } else {
-        // 0x90000018 = 0x55 (Software Reset)
-        hx_sw_reset_ahb_intf(DeviceType::Master);
-    }
-
-    // 4. 等待 FW Ready
-    for (int i = 0; i < 50; i++) {
-        uint8_t status[4] = {0};
-        if (register_read(m_master.get(), m_ic_op, m_fw_op.addr_chk_fw_status, status, 4)) {
-            if (status[0] == 0x05) {
-                HIMAX_LOG("hx_sense_on success (FW Ready)");
-                return true; // 成功启动
-            }
+    // 3. 执行复位，并读取addr_sts_chk，尝试5次
+    uint8_t attempt = 0;
+    do {
+        if (isHwReset) {
+            hx_hw_reset_ahb_intf(DeviceType::Master);
+        } else {
+            // 0x90000018 = 0x55 (Software Reset)
+            hx_sw_reset_ahb_intf(DeviceType::Master);
         }
-        Sleep(10);
+        //
+        step_ok = register_read(m_master.get(), m_zf_op.addr_sts_chk, tmp_data.data(), 4);
+        if (step_ok) {
+            if (tmp_data[0] == 0x05) break;
+        } else {
+            step_ok = false;
+            attempt++;
+        }
+    }while (attempt < 5);
+    
+    if (step_ok) {
+        for (int retry = 0; retry < 50; retry++) {
+            if (hx_is_reload_done_ahb()) {
+                step_ok = true;
+                break;
+            }
+            Sleep(1);
+        }
+    
+        if (step_ok) {
+            hx_set_raw_data_type(hx_mode, 0);
+            hx_set_raw_data_type(hx_mode, 1);
+            Sleep(0x14);
+            HIMAX_LOG("OUT!");
+            return true;
+        }
+    //这里的else逻辑还有待确认
+    } else {
+        tmp_data.clear();
+        tmp_data.resize(4, 0);
+        step_ok = register_read(m_master.get(), m_fw_op.addr_reload_status, tmp_data.data(), 4);
+        if (step_ok) {
+            message = std::format("reload status 0x{:8x} = 0x{:X}", 0x80050000, tmp_data[0]);
+            HIMAX_LOG(message);
+        }
+        HIMAX_LOG("OUT!");
+        return false;
     }
     
     HIMAX_LOG("hx_sense_on timeout");
@@ -856,7 +945,7 @@ void Chip::thp_afe_start(void) {
     Sleep(0x19);
     bool THP_AFE_STATE = check_bus();
 
-    burst_enable(m_master.get(), m_ic_op, 1);
+    burst_enable(m_master.get(), 1);
     
     //initbuffer&register
 
@@ -878,9 +967,40 @@ void Chip::thp_afe_start(void) {
     std::vector<uint8_t> tmp_buffer1(5063);
     std::vector<uint8_t> tmp_buffer2(339);
 
-    m_master->GetFrame(tmp_buffer1.data(), 5063, nullptr);
-    m_slave->GetFrame(tmp_buffer2.data(), 339, nullptr);
+    for (int cnt = 0; cnt < 3; cnt++) {
+        if (m_slave->GetFrame(tmp_buffer2.data(), 339, nullptr)) {
+            m_slave->IntOpen();
+        }
+        if (m_master->GetFrame(tmp_buffer1.data(), 5063, nullptr)) {
+            m_master->IntOpen();
+        }
+        
+    }
+    
     //更新状态
 
+}
+
+bool Chip::WaitInterrupt() {
+    if (m_interrupt && m_interrupt->IsValid()) {
+        return m_interrupt->WaitInterrupt();
+    }
+    return false;
+}
+
+bool Chip::GetMasterData(std::vector<uint8_t>& buffer) {
+    if (m_master && m_master->IsValid()) {
+        uint32_t retLen = 0;
+        return m_master->GetFrame(buffer.data(), static_cast<uint32_t>(buffer.size()), &retLen);
+    }
+    return false;
+}
+
+bool Chip::GetSlaveData(std::vector<uint8_t>& buffer) {
+    if (m_slave && m_slave->IsValid()) {
+        uint32_t retLen = 0;
+        return m_slave->GetFrame(buffer.data(), static_cast<uint32_t>(buffer.size()), &retLen);
+    }
+    return false;
 }
 } // namespace Himax
