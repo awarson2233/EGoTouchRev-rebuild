@@ -7,7 +7,7 @@ EGoTouch-Rev (Rebuild)
 核心硬件与架构
 -------
 
-* **目标设备**: Huawei Matebook E Go (GK-G58)
+* **目标设备**: Huawei Matebook E Go (2022性能版)
 
 * **Touch IC**: Himax HX83121A (SPI Interface)
 
