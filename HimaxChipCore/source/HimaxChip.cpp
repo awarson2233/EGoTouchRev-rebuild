@@ -11,6 +11,7 @@
 #include <string>
 #include <synchapi.h>
 #include <vector>
+#include <wingdi.h>
 
 namespace {
 constexpr uint8_t ByteAt(uint32_t value, uint8_t index) noexcept {
@@ -85,7 +86,9 @@ Chip::Chip(const std::wstring& master_path, const std::wstring& slave_path, cons
     m_master = std::make_unique<HalDevice>(master_path.c_str(), DeviceType::Master);
     m_slave  = std::make_unique<HalDevice>(slave_path.c_str(), DeviceType::Slave);
     m_interrupt = std::make_unique<HalDevice>(interrupt_path.c_str(), DeviceType::Interrupt);
+    
     hx_mode = 0x105;
+    addr_unknown = 0x00;
 
     InitLogFile();
 }
@@ -436,13 +439,6 @@ bool burst_enable(HalDevice* dev, uint8_t state) {
     
     bool res = false;
     uint8_t tmp_data[4];
-    tmp_data[0] = 0x31;
-
-    res = dev->WriteBus(0x13, NULL, tmp_data, 1);
-    if (!res) {
-        dev->GetError();
-        return false;
-    }
 
     tmp_data[0] = (0x12 | state);
 
@@ -451,7 +447,17 @@ bool burst_enable(HalDevice* dev, uint8_t state) {
         dev->GetError();
         return false;
     }
+    
+    tmp_data[0] = 0x31;
+    
+    res = dev->WriteBus(0x13, NULL, tmp_data, 1);
+    if (!res) {
+        dev->GetError();
+        return false;
+    }
+    
     return res;
+    
 }
 
 bool register_read(HalDevice* dev, const uint8_t* addr, uint8_t* buffer, uint32_t len) {
@@ -484,7 +490,7 @@ bool register_read(HalDevice* dev, const uint8_t* addr, uint8_t* buffer, uint32_
     return res;
 }
 
-bool register_write(HalDevice* dev, const uint8_t* addr, uint8_t* val, uint32_t len) {
+bool register_write(HalDevice* dev, const uint8_t* addr, const uint8_t* val, uint32_t len) {
     if (!dev || !dev->IsValid()) return false;
 
     if (len > 4) {
@@ -512,7 +518,7 @@ bool write_and_verify(HalDevice* dev, const uint8_t* addr, const uint8_t* data, 
     std::vector<uint8_t> write_buf(data, data + len);
     std::vector<uint8_t> read_buf(len, 0);
 
-    if (!dev->WriteBus(0x00, addr, data, len)) {
+    if (!register_write(dev, addr, data, len)) {
         HIMAX_LOG("bus access failed");
         return false;
     }
@@ -627,21 +633,60 @@ bool Chip::init_buffers_and_register(void) {
     return true;
 }
 
-bool Chip::hx_set_raw_data_type(uint32_t mode, bool /*state*/) {
+bool Chip::send_and_check_command(uint8_t param_1, uint8_t param_3) {
+    std::vector<uint8_t> tmp_data(16, 0);
+    tmp_data[0] = 0xa8;
+    tmp_data[1] = 0x8a;
+    tmp_data[2] = param_1;
+    tmp_data[3] = 0x00;
+    tmp_data[4] = param_3;
+
+    uint16_t sum = 0;
+    for (size_t i = 0; i < 14; i++) {
+        uint16_t word = tmp_data[i] | (tmp_data[i + 1] << 8);
+        sum += word;
+    }
+    uint16_t checksum = static_cast<uint16_t>(0x10000 - sum);
+
+    tmp_data[14] = static_cast<uint8_t>(checksum & 0xFF);
+    tmp_data[15] = static_cast<uint8_t>((checksum << 8) & 0xFF);
+
+    uint8_t addr_7550[] = {0x50, 0x75, 0x00, 0x10};
+    register_write(m_master.get(), addr_7550, tmp_data.data(), tmp_data.size());
+
+    // 写入 0x10007560
+    uint8_t addr_7560[] = {0x60, 0x75, 0x00, 0x10};
+    register_write(m_master.get(), addr_7560, tmp_data.data(), tmp_data.size());
+    
+    // 写入 0x10007570 (日志里也有这个)
+    uint8_t addr_7570[] = {0x70, 0x75, 0x00, 0x10};
+    register_write(m_master.get(), addr_7570, tmp_data.data(), tmp_data.size());
+
+    return true;
+}
+
+bool Chip::thp_afe_clear_status(uint8_t param_1) {
+    return send_and_check_command(6, param_1);
+}
+
+bool Chip::hx_set_raw_data_type(DeviceType device, uint32_t type) {
+    HalDevice* dev = SelectDevice(device);
+    if (!dev || !dev->IsValid()) return false;
+
     std::vector<uint8_t> tmp_data(4, 0);
     
-    switch (mode) {
+    switch (type) {
         case 0x100: tmp_data[0] = 0x0B; break;
         case 0x101:
         case 0x102: tmp_data[0] = 0x0A; break;
         case 0x103: tmp_data[0] = 0x0F; break;
         case 0x105: tmp_data[0] = 0xF6; break;
-        default:    tmp_data[0] = mode; break;
+        default:    tmp_data[0] = type; break;
     }
 
     bool step_ok = false;
     for (int i = 0; i < 10; ++i) {
-        if (write_and_verify(m_master.get(), m_fw_op.addr_raw_out_sel, tmp_data.data(), 4, 1)) {
+        if (write_and_verify(dev, m_fw_op.addr_raw_out_sel, tmp_data.data(), 4, 1)) {
             step_ok = true;
             break;
         }
@@ -656,7 +701,7 @@ bool Chip::hx_set_raw_data_type(uint32_t mode, bool /*state*/) {
     step_ok = false;
     for (int i = 0; i < 10; ++i) {
         // 修正：passwrd 长度为 2 字节
-        if (register_write(m_master.get(), m_sram_op.addr_rawdata_addr, m_on_sram_op.passwrd, 4)) {
+        if (register_write(dev, m_sram_op.addr_rawdata_addr, m_on_sram_op.passwrd, 4)) {
             step_ok = true;
             break;
         }
@@ -667,7 +712,7 @@ bool Chip::hx_set_raw_data_type(uint32_t mode, bool /*state*/) {
         HIMAX_LOG("Failed to write SRAM password (0x5AA5)");
     }
 
-    message = std::format("set raw data out select: 0x{:02X}", mode);
+    message = std::format("set raw data out select: 0x{:02X}", type);
     HIMAX_LOG(message);
     return true;
 }
@@ -680,7 +725,7 @@ bool Chip::hx_hw_reset_ahb_intf(DeviceType type) {
     message = std::format("Enter!");
     HIMAX_LOG(message);
 
-    bool step_ok = dev->WriteBus(0x00, m_driver_op.addr_fw_define_2nd_flash_reload, m_fw_op.data_clear, 4);
+    bool step_ok = register_write(dev, m_driver_op.addr_fw_define_2nd_flash_reload, m_fw_op.data_clear, 4);
     message = std::format("clear reload done {}", step_ok ? "succed" : "failed");
     HIMAX_LOG(message);
     res = res && step_ok;
@@ -791,11 +836,9 @@ bool Chip::hx_switch_mode(uint32_t mode) {
     constexpr int kUnlockAttempts = 20;
     constexpr int kWriteAttempts = 20;
 
-    bool unlocked = false;
-    for (int attempt = 0; attempt < kUnlockAttempts && !unlocked; ++attempt) {
-        unlocked = write_and_verify(m_master.get(), m_sram_op.addr_rawdata_addr, m_sram_op.passwrd, 2);
-    }
-    if (!unlocked) {
+    bool clear = false;
+    clear = write_and_verify(m_master.get(), m_sram_op.addr_rawdata_addr, m_sram_op.addr_rawdata_end, 4, 2);
+    if (!clear) {
         message = std::format("switch mode unlock failed after {} attempts", kUnlockAttempts);
         HIMAX_LOG(message);
         return false;
@@ -834,8 +877,12 @@ bool Chip::hx_switch_mode(uint32_t mode) {
         (static_cast<uint32_t>(tmp_data[3]) << 24);
 
     bool wrote = false;
-    for (int attempt = 0; attempt < kWriteAttempts && !wrote; ++attempt) {
-        wrote = write_and_verify(m_master.get(), m_fw_op.addr_sorting_mode_en, tmp_data, 4);
+    for (int attempt = 0; attempt < kWriteAttempts; ++attempt) {
+        if (write_and_verify(m_master.get(), m_fw_op.addr_sorting_mode_en, tmp_data, 4)) {
+            wrote = true;
+            break;
+        }
+        Sleep(10);
     }
 
     if (wrote) {
@@ -898,7 +945,14 @@ bool Chip::hx_sense_on(bool isHwReset) {
         //
         step_ok = register_read(m_master.get(), m_zf_op.addr_sts_chk, tmp_data.data(), 4);
         if (step_ok) {
-            if (tmp_data[0] == 0x05) break;
+            if (tmp_data[0] == 0x05) {
+                message = std::format("sts_chk check success1");
+                HIMAX_LOG(message);
+                break;
+            } else {
+                message = std::format("sts_chk: 0x{:02X}", tmp_data[0]);
+                HIMAX_LOG(message);
+            }
         } else {
             step_ok = false;
             attempt++;
@@ -915,8 +969,8 @@ bool Chip::hx_sense_on(bool isHwReset) {
         }
     
         if (step_ok) {
-            hx_set_raw_data_type(hx_mode, 0);
-            hx_set_raw_data_type(hx_mode, 1);
+            hx_set_raw_data_type(DeviceType::Master, hx_mode);
+            hx_set_raw_data_type(DeviceType::Slave, hx_mode);
             Sleep(0x14);
             HIMAX_LOG("OUT!");
             return true;
@@ -939,12 +993,17 @@ bool Chip::hx_sense_on(bool isHwReset) {
 }
 
 void Chip::thp_afe_start(void) {
+    hx_hw_reset_ahb_intf(DeviceType::Slave);
+    hx_hw_reset_ahb_intf(DeviceType::Master);
+
     //不尝试，成功SpiSetReset set high,失败SpiSetReset set high failed!
     m_master->SetReset(1);
 
     Sleep(0x19);
     bool THP_AFE_STATE = check_bus();
-
+    if (!THP_AFE_STATE) {
+        throw ERROR;
+    }
     burst_enable(m_master.get(), 1);
     
     //initbuffer&register
@@ -978,6 +1037,7 @@ void Chip::thp_afe_start(void) {
     }
     
     //更新状态
+    thp_afe_clear_status(0x08);
 
 }
 

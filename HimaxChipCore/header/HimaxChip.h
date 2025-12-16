@@ -325,6 +325,7 @@ private:
     std::unique_ptr<HalDevice> m_interrupt;
 
     uint32_t hx_mode;
+    uint32_t addr_unknown;
 
     ic_operation        m_ic_op{};
     fw_operation        m_fw_op{};
@@ -344,16 +345,18 @@ private:
     
     bool hx_reload_set(uint8_t state);
     bool init_buffers_and_register(void);
-    
+
+    bool send_and_check_command(uint8_t param_1, uint8_t param_3);
     bool hx_hw_reset_ahb_intf(DeviceType type);
     bool hx_sw_reset_ahb_intf(DeviceType type); 
     bool hx_is_reload_done_ahb(void);
 
     bool hx_set_N_frame(uint8_t nFrame);
-    bool hx_set_raw_data_type(uint32_t hx_mode, bool state);
+    bool hx_set_raw_data_type(DeviceType type, uint32_t hx_mode);
     bool hx_switch_mode(uint32_t mode);
     bool hx_sense_on(bool isHwReset);
 
+    bool thp_afe_clear_status(uint8_t param_1);
     void thp_afe_stop(void);
     void InitLogFile();
     
