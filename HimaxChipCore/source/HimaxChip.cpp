@@ -490,6 +490,44 @@ bool register_read(HalDevice* dev, const uint8_t* addr, uint8_t* buffer, uint32_
     return res;
 }
 
+void build_local_60_packet(uint8_t param_1, uint8_t param_3, uint8_t* output_buffer) {
+    // 1. 初始化缓冲区为 0 (对应 local_5b = 0, local_50 = 0 等初始化)
+    for (int i = 0; i < 16; i++) {
+        output_buffer[i] = 0;
+    }
+
+    // 2. 设置包含“虚拟包头”的初始值，用于计算 CheckSum
+    output_buffer[0] = 0xA8;     // local_60[0]
+    output_buffer[1] = 0x8A;     // local_60[1]
+    output_buffer[2] = param_1;  // local_60[2]
+    output_buffer[3] = 0x00;     // local_60[3]
+    output_buffer[4] = param_3;  // local_60[4]
+    
+    // 3. 计算 CheckSum (iVar13)
+    // 逻辑：将 16 字节看作 8 个 uint16 (小端序) 进行累加
+    uint32_t checksum_sum = 0;
+    
+    for (int i = 0; i < 16; i += 2) {
+        // 组合低字节和高字节 (Little Endian)
+        // bVar3 = buffer[i]; *pbVar1 = buffer[i+1];
+        uint16_t word = output_buffer[i] | (output_buffer[i+1] << 8);
+        checksum_sum += word;
+    }
+
+    // 4. 计算最终校验值 (对应: 0x10000 - iVar13)
+    // 注意：这里只取低16位有效值
+    uint16_t final_checksum = (uint16_t)(0x10000 - checksum_sum);
+
+    // 5. 填入 CheckSum 到 buffer 末尾 (Index 14, 15)
+    // 根据分析：是 Little Endian 写入
+    output_buffer[14] = final_checksum & 0xFF;        // 低字节 (0x4A)
+    output_buffer[15] = (final_checksum >> 8) & 0xFF; // 高字节 (0x75)
+
+    // 6. 关键步骤：发送前清除包头
+    output_buffer[0] = 0x00;
+    output_buffer[1] = 0x00;
+}
+
 bool register_write(HalDevice* dev, const uint8_t* addr, const uint8_t* val, uint32_t len) {
     if (!dev || !dev->IsValid()) return false;
 
@@ -635,32 +673,18 @@ bool Chip::init_buffers_and_register(void) {
 
 bool Chip::send_and_check_command(uint8_t param_1, uint8_t param_3) {
     std::vector<uint8_t> tmp_data(16, 0);
-    tmp_data[0] = 0xa8;
-    tmp_data[1] = 0x8a;
-    tmp_data[2] = param_1;
-    tmp_data[3] = 0x00;
-    tmp_data[4] = param_3;
-
-    uint16_t sum = 0;
-    for (size_t i = 0; i < 14; i++) {
-        uint16_t word = tmp_data[i] | (tmp_data[i + 1] << 8);
-        sum += word;
-    }
-    uint16_t checksum = static_cast<uint16_t>(0x10000 - sum);
-
-    tmp_data[14] = static_cast<uint8_t>(checksum & 0xFF);
-    tmp_data[15] = static_cast<uint8_t>((checksum << 8) & 0xFF);
-
-    uint8_t addr_7550[] = {0x50, 0x75, 0x00, 0x10};
-    register_write(m_master.get(), addr_7550, tmp_data.data(), tmp_data.size());
-
-    // 写入 0x10007560
-    uint8_t addr_7560[] = {0x60, 0x75, 0x00, 0x10};
-    register_write(m_master.get(), addr_7560, tmp_data.data(), tmp_data.size());
     
-    // 写入 0x10007570 (日志里也有这个)
-    uint8_t addr_7570[] = {0x70, 0x75, 0x00, 0x10};
-    register_write(m_master.get(), addr_7570, tmp_data.data(), tmp_data.size());
+    uint8_t tmp_addr[] = {0x50, 0x75, 0x00, 0x10};
+    
+    for (int i = 0; i < 3; i++) {
+        build_local_60_packet(param_1, param_3, tmp_data.data());
+        register_write(m_master.get(), tmp_addr, tmp_data.data(), tmp_data.size());
+
+        tmp_data[0] = 0xa8;
+        tmp_data[1] = 0x8a;
+        register_write(m_master.get(), tmp_addr, tmp_data.data(), 4);
+        tmp_addr[0] = tmp_addr[0] + 0x10;
+    }
 
     return true;
 }
