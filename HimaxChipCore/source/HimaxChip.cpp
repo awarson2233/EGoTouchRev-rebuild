@@ -585,6 +585,16 @@ bool write_and_verify(HalDevice* dev, const uint8_t* addr, const uint8_t* data, 
     return false;
 }
 
+
+/**
+ * @brief 设置 Safe Mode 接口状态
+ * 
+ * @param dev 设备指针
+ * @param state 目标状态
+ *              - true: 进入 Safe Mode (写入 {0x27, 0x95} 到 0x31)
+ *              - false: 退出 Safe Mode (写入 {0x00, 0x00} 到 0x31)
+ * @return bool 操作是否成功
+ */
 bool safeModeSetRaw_intf(HalDevice* dev, const bool state) {
     if (!dev || !dev->IsValid()) return false;
     uint8_t tmp_data[2]{};
@@ -667,30 +677,32 @@ bool Chip::init_buffers_and_register(void) {
     uint8_t tmp_register2[4] = {0x3c, 0x75, 0x00, 0x10};
     register_write(m_master.get(), tmp_register, tmp_data.data(), 0x50);
     register_write(m_master.get(), tmp_register2, m_on_fw_op.data_clear, 4);
+    current_slot = 0x00;
 
     return true;
 }
 
-bool Chip::send_and_check_command(uint8_t param_1, uint8_t param_3) {
+bool Chip::hx_send_command(uint8_t param_1, uint8_t param_3) {
     std::vector<uint8_t> tmp_data(16, 0);
-    
-    uint8_t tmp_addr[] = {0x50, 0x75, 0x00, 0x10};
-    
-    for (int i = 0; i < 3; i++) {
-        build_local_60_packet(param_1, param_3, tmp_data.data());
-        register_write(m_master.get(), tmp_addr, tmp_data.data(), tmp_data.size());
+    uint32_t addr = 0x1000755;
+    uint8_t tmp_addr[4]{};
+    WriteU32(tmp_addr, (addr + current_slot) * 10);
 
-        tmp_data[0] = 0xa8;
-        tmp_data[1] = 0x8a;
-        register_write(m_master.get(), tmp_addr, tmp_data.data(), 4);
-        tmp_addr[0] = tmp_addr[0] + 0x10;
-    }
+    
+    build_local_60_packet(param_1, param_3, tmp_data.data());
+    register_write(m_master.get(), tmp_addr, tmp_data.data(), tmp_data.size());
 
+    tmp_data[0] = 0xa8;
+    tmp_data[1] = 0x8a;
+    register_write(m_master.get(), tmp_addr, tmp_data.data(), 4);
+        
+    register_read(m_master.get(), tmp_addr, tmp_data.data(), 0x10);
+    current_slot = (tmp_addr[0] + 1) % 5;
     return true;
 }
 
 bool Chip::thp_afe_clear_status(uint8_t param_1) {
-    return send_and_check_command(6, param_1);
+    return hx_send_command(6, param_1);
 }
 
 bool Chip::hx_set_raw_data_type(DeviceType device, uint32_t type) {
@@ -1014,6 +1026,63 @@ bool Chip::hx_sense_on(bool isHwReset) {
     
     HIMAX_LOG("hx_sense_on timeout");
     return false; // 启动超时
+}
+
+bool Chip::hx_sense_off(bool check_en) {
+    bool step_ok = false;
+    bool state = true;
+    int cnt = 0;
+    std::array<uint8_t, 4> tmp_data;
+    do {
+        if (cnt == 0 || (tmp_data[0] != 0xA5 && tmp_data[0] != 0x00 && tmp_data[0] != 0x87)) {
+            step_ok = register_write(m_master.get(), m_fw_op.addr_ctrl_fw_isr, m_fw_op.data_fw_stop, 4);
+        }
+        Sleep(20);
+
+        step_ok = register_read(m_master.get(), m_fw_op.addr_chk_fw_status, tmp_data.data(), 4);
+        if ((tmp_data[0] != 0x05) || (check_en == false)) { 
+            message = std::format("Do not need wait FW, status = 0x{:X}", tmp_data[0]);
+            HIMAX_LOG(message);
+            break;
+        }
+
+        register_read(m_master.get(), m_fw_op.addr_ctrl_fw_isr, tmp_data.data(), 4);
+        
+    }while (tmp_data[0] != 0x87 && (++cnt < 20) && check_en);
+    
+
+    cnt = 0;
+    tmp_data.fill(0);
+    do {
+        for (int i = 0; i < 5; i++) {
+            step_ok = safeModeSetRaw_intf(m_master.get(), false);
+            if (step_ok) break;
+        }
+
+        step_ok = register_read(m_master.get(), m_fw_op.addr_chk_fw_status, tmp_data.data(), 4);
+
+        if (tmp_data[0] == 0x0C) {
+            //reset TCON
+            step_ok = register_write(m_master.get(), m_ic_op.addr_tcon_on_rst, m_ic_op.data_rst, 4);
+            
+            //原厂驱动没有 reset ADC，保留
+            /* 
+            step_ok = register_write(m_master.get(), m_ic_op.addr_adc_on_rst, m_ic_op.data_rst, 4);
+            
+            tmp_data = {0x01, 0x00, 0x00, 0x00};
+            step_ok = register_write(m_master.get(), m_ic_op.addr_adc_on_rst, tmp_data.data(), 4);
+            */
+            if (step_ok) {
+                message = std::format("reset TCON success!");
+                HIMAX_LOG(message);
+                break;
+            }
+        }
+    }while (cnt++ < 15);
+
+    message = std::format("Out!");
+    HIMAX_LOG(message);
+    return step_ok;
 }
 
 void Chip::thp_afe_start(void) {

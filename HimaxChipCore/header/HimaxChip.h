@@ -326,6 +326,7 @@ private:
 
     uint32_t hx_mode;
     uint32_t addr_unknown;
+    uint8_t current_slot;
 
     ic_operation        m_ic_op{};
     fw_operation        m_fw_op{};
@@ -346,7 +347,7 @@ private:
     bool hx_reload_set(uint8_t state);
     bool init_buffers_and_register(void);
 
-    bool send_and_check_command(uint8_t param_1, uint8_t param_3);
+    bool hx_send_command(uint8_t param_1, uint8_t param_3);
     bool hx_hw_reset_ahb_intf(DeviceType type);
     bool hx_sw_reset_ahb_intf(DeviceType type); 
     bool hx_is_reload_done_ahb(void);
@@ -354,15 +355,18 @@ private:
     bool hx_set_N_frame(uint8_t nFrame);
     bool hx_set_raw_data_type(DeviceType type, uint32_t hx_mode);
     bool hx_switch_mode(uint32_t mode);
+
     bool hx_sense_on(bool isHwReset);
+    bool hx_sense_off(bool check_en);
 
     bool thp_afe_clear_status(uint8_t param_1);
     void thp_afe_stop(void);
     void InitLogFile();
     
+    bool thp_afe_enable_freq_shift();
     std::ofstream m_logFile;
     std::string message;
-    public:
+public:
     void thp_afe_start(void);
     Chip(const std::wstring& master_path, const std::wstring& slave_path, const std::wstring& interrupt_path);
     bool IsReady(DeviceType type) const;
