@@ -1,4 +1,4 @@
-EGoTouch-Rev (Rebuild)
+EGoTouch-Rev
 ======================
 
 **EGoTouch-Rev** 是针对 **Huawei Matebook E Go (Windows on Arm64)** 设备触摸屏驱动服务的高性能重构项目。
