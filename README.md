@@ -15,7 +15,7 @@ EGoTouch-Rev
   
   * **User Mode**: `EGoTouchService` (本服务) - 负责 SPI 通信、协议解析、热力图算法。
   
-  * **Kernel Mode**: 华为原厂 SPI 驱动 (`SPBTESTTOOL`) + 微软 VHF (Virtual HID Framework)。
+  * **Kernel Mode**: 原厂 SPI 驱动 (`SPBTESTTOOL`) + 微软 VHF (Virtual HID Framework)。
   
   * **通信协议**: 基于 Himax F2/F3 (Master) & F4/F5 (Slave) 指令集的自定义 SPI 协议。
 
