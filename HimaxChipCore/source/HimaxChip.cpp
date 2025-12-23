@@ -1099,14 +1099,6 @@ void Chip::thp_afe_start(void) {
     }
     burst_enable(m_master.get(), 1);
     
-    //initbuffer&register
-
-        //向10007550写入长为80的0数组用于清空
-        
-        //清空完后向3c750010写入4位0数组
-
-        //设置寄存器与缓冲区，退出initbuffer&register
-    
     init_buffers_and_register();
     
     //hx_sense_on
@@ -1128,9 +1120,6 @@ void Chip::thp_afe_start(void) {
         }
         
     }
-    
-    //更新状态
-    thp_afe_clear_status(0x08);
 
 }
 

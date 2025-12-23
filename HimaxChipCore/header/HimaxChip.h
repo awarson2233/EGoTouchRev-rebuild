@@ -370,7 +370,7 @@ public:
     void thp_afe_start(void);
     Chip(const std::wstring& master_path, const std::wstring& slave_path, const std::wstring& interrupt_path);
     bool IsReady(DeviceType type) const;
-
+    bool hx_ts_work(void);
     bool WaitInterrupt();
     bool GetMasterData(std::vector<uint8_t>& buffer);
     bool GetSlaveData(std::vector<uint8_t>& buffer);
