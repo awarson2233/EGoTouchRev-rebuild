@@ -33,14 +33,15 @@ namespace Himax {
         HANDLE m_handle;
         DWORD m_lastError;
         DeviceType m_type;
-
+        
         uint8_t m_readOp;
         uint8_t m_writeOp;
-
+        
         const size_t dummy_size = 1;
         const size_t header_size = 2;
         const size_t data_offset = header_size + dummy_size;
-
+        
+        OVERLAPPED m_ov = {};
         std::vector<uint8_t> m_xfer_buffer;
         std::recursive_mutex m_mutex;
     };

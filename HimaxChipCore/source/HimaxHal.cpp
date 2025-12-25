@@ -1,8 +1,24 @@
+/*
+ * @Author: Detach0-0 detach0-0@outlook.com
+ * @Date: 2025-12-01 19:25:55
+ * @LastEditors: Detach0-0 detach0-0@outlook.com
+ * @LastEditTime: 2025-12-25 00:46:34
+ * @FilePath: \EGoTouchRev-vsc\HimaxChipCore\source\HimaxHal.cpp
+ * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+ */
 #include "HimaxHal.h"
 #include "HimaxChip.h"
 #include <cstddef>
+#include <cstdint>
+#include <errhandlingapi.h>
 #include <format>
+#include <handleapi.h>
+#include <ioapiset.h>
+#include <minwindef.h>
 #include <string>
+#include <synchapi.h>
+#include <windows.h>
+#include <winscard.h>
 
 constexpr uint8_t OP_WRITE_MASTER = 0xF2;
 constexpr uint8_t OP_READ_MASTER  = 0xF3;
@@ -21,6 +37,12 @@ const DWORD SPI_IOCTL_SET_RESET   = 0x4001c34; // 复位设备
 const DWORD SPI_IOCTL_READ_ACPI   = 0x4001c38; // 读取 ACPI 配置
 
 namespace {
+    /**
+     * @brief 将字节数组转换为十六进制字符串
+     * @param data 数据指针
+     * @param len 数据长度
+     * @return std::string 十六进制字符串
+     */
     std::string BytesToHex(const uint8_t* data, size_t len) {
         if (!data || len == 0) return "";
         std::string res;
@@ -32,6 +54,17 @@ namespace {
         return res;
     }
 
+    /**
+     * @brief 执行同步 I/O 操作（封装 Overlapped 异步操作为同步）
+     * @param handle 文件句柄
+     * @param mutex 互斥锁
+     * @param lastError 错误码输出
+     * @param ioFunc I/O 函数 lambda
+     * @param expectedLen 预期长度
+     * @param checkLen 是否检查长度
+     * @param outBytes 实际传输字节数输出
+     * @return bool 是否成功
+     */
     template<typename Func>
     bool PerformSyncIo(HANDLE handle, std::recursive_mutex& mutex, DWORD& lastError, Func ioFunc, DWORD expectedLen = 0, bool checkLen = false, DWORD* outBytes = NULL) {
         if (handle == INVALID_HANDLE_VALUE) {
@@ -80,7 +113,11 @@ namespace {
 
 namespace Himax {
 
-
+    /**
+     * @brief 构造函数，打开设备句柄并初始化
+     * @param path 设备路径
+     * @param type 设备类型 (Master/Slave/Interrupt)
+     */
     HalDevice::HalDevice(const wchar_t* path, DeviceType type) : m_handle(INVALID_HANDLE_VALUE), m_lastError(0), m_type(type) {
         m_xfer_buffer.reserve(0x4000 + 32);
 
@@ -96,6 +133,16 @@ namespace Himax {
         if (m_handle == INVALID_HANDLE_VALUE) {
             m_lastError = GetLastError();
         }
+
+        m_ov.hEvent = CreateEvent(nullptr, true, false, nullptr);
+        if (m_ov.hEvent == nullptr) {
+            m_lastError = GetLastError();
+            if (m_handle != INVALID_HANDLE_VALUE) {
+                CloseHandle(m_handle);
+                m_handle = INVALID_HANDLE_VALUE;
+            }
+            return;
+        }
         if (type == DeviceType::Slave) {
             m_readOp = OP_READ_SLAVE;
             m_writeOp = OP_WRITE_SLAVE;
@@ -105,12 +152,37 @@ namespace Himax {
         }
     }
 
+    /**
+     * @brief 析构函数，关闭句柄
+     */
     HalDevice::~HalDevice() {
-        if (IsValid()) CloseHandle(m_handle);
+        if (m_ov.hEvent) {
+            CloseHandle(m_ov.hEvent);
+            m_ov.hEvent = nullptr;
+        }
+        
+        if (IsValid()) {
+            CloseHandle(m_handle);
+            m_handle = INVALID_HANDLE_VALUE;
+        }
     }
 
+    /**
+     * @brief 检查设备句柄是否有效
+     * @return bool 是否有效
+     */
     bool HalDevice::IsValid() const {return m_handle != INVALID_HANDLE_VALUE;}
 
+    /**
+     * @brief 执行 DeviceIoControl 操作
+     * @param code 控制码
+     * @param in 输入缓冲区
+     * @param inLen 输入长度
+     * @param out 输出缓冲区
+     * @param outLen 输出长度
+     * @param retLen 实际返回长度
+     * @return bool 是否成功
+     */
     bool HalDevice::Ioctl(DWORD code, const void* in, uint32_t inLen, void* out, uint32_t outLen, uint32_t* retLen) {
         bool result = false;
         for (int cnt = 0; cnt < 10; cnt++) {
@@ -123,48 +195,72 @@ namespace Himax {
         return result;
     }
 
+    /**
+     * @brief 从设备读取原始数据
+     * @param buffer 缓冲区
+     * @param len 读取长度
+     * @return bool 是否成功
+     */
     bool HalDevice::Read(void* buffer, uint32_t len) {
         return PerformSyncIo(m_handle, m_mutex, m_lastError, [&](OVERLAPPED* pov, LPDWORD pBytes){
             return ReadFile(m_handle, buffer, len, pBytes, pov);
         });
     }
 
+    /**
+     * @brief 等待设备中断触发
+     * @return bool 是否成功触发
+     */
     bool HalDevice::WaitInterrupt() {
-        if (!IsValid()) { m_lastError = ERROR_INVALID_HANDLE; return false; }
-
-        // 中断等待通常是阻塞的，但这里用异步方式去“挂起”一个请求
-        OVERLAPPED ov = {0};
-        ov.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-        if (!ov.hEvent) return false;
-
-        BOOL res = FALSE;
-        {
-            std::lock_guard<std::recursive_mutex> lock(m_mutex);
-            res = DeviceIoControl(m_handle, SPI_IOCTL_WAIT_INT, NULL, 0, NULL, 0, NULL, &ov);
+        if (!IsValid() || !m_ov.hEvent) { 
+            m_lastError = ERROR_INVALID_HANDLE;
+            return false; 
         }
+
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+        
+        ResetEvent(m_ov.hEvent);
+        
+        DWORD bytesReturned = 0;
+        BOOL res = DeviceIoControl(
+            m_handle,
+            SPI_IOCTL_WAIT_INT,
+            nullptr, 0,
+            nullptr, 0,
+            &bytesReturned, &m_ov
+        );
 
         if (!res && GetLastError() != ERROR_IO_PENDING) {
             m_lastError = GetLastError();
-            CloseHandle(ov.hEvent);
             return false;
         }
 
-        // 等待中断触发 (INFINITE 可能导致卡死，实际应用可考虑加超时)
-        if (WaitForSingleObject(ov.hEvent, INFINITE) == WAIT_OBJECT_0) {
-            DWORD bytes = 0;
-            GetOverlappedResult(m_handle, &ov, &bytes, TRUE);
-            res = TRUE;
-        }
-        else {
-            m_lastError = GetLastError();
-            res = FALSE;
+        DWORD waitResult = WaitForSingleObject(m_ov.hEvent, 200);
+
+        if (waitResult != WAIT_OBJECT_0) {
+            m_lastError = (waitResult == WAIT_FAILED) ? GetLastError() : ERROR_GEN_FAILURE;
+            return false;
         }
 
-        CloseHandle(ov.hEvent);
-        return res;
+        BOOL ok = GetOverlappedResult(m_handle, &m_ov, &bytesReturned, FALSE);
+        if (!ok) {
+            m_lastError = GetLastError();
+            return false;
+        }
+
+        ResetEvent(m_ov.hEvent);
+        m_lastError = 0;
+        return true;
     }
 
 
+    /**
+     * @brief 通过总线读取数据
+     * @param cmd 命令码
+     * @param data 接收缓冲区
+     * @param len 读取长度
+     * @return bool 是否成功
+     */
     bool HalDevice::ReadBus(uint8_t cmd, uint8_t* data, uint32_t len) {
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         bool res = false;
@@ -199,6 +295,14 @@ namespace Himax {
         return res;
     }
 
+    /**
+     * @brief 通过总线写入数据
+     * @param cmd 命令码
+     * @param addr 地址 (可选)
+     * @param data 数据缓冲区
+     * @param len 数据长度
+     * @return bool 是否成功
+     */
     bool HalDevice::WriteBus(const uint8_t cmd, const uint8_t* addr, const uint8_t* data, const uint32_t len) {
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
@@ -221,10 +325,16 @@ namespace Himax {
         });
     }
 
+    /**
+     * @brief 读取 ACPI 配置数据
+     * @param data 接收缓冲区
+     * @param len 读取长度
+     * @return bool 是否成功
+     */
     bool HalDevice::ReadAcpi(uint8_t* data, uint32_t len) {
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         bool res = false;
-        m_xfer_buffer.clear();
+        m_xfer_buffer.assign(len, 0);
         
         uint32_t retLen = 0;
 
@@ -237,16 +347,33 @@ namespace Himax {
         return res;
     }
 
+    /**
+     * @brief 获取一帧完整的触摸数据
+     * @param buffer 接收缓冲区
+     * @param outLen 缓冲区长度
+     * @param retLen 实际返回长度
+     * @return bool 是否成功
+     */
     bool HalDevice::GetFrame(void* buffer, uint32_t outLen, uint32_t *retLen){
         return Ioctl(SPI_IOCTL_GET_FRAME, NULL, 0, buffer, outLen, retLen);
     }
 
+    /**
+     * @brief 设置 I/O 超时时间
+     * @param milisecond 毫秒数
+     * @return bool 是否成功
+     */
     bool HalDevice::SetTimeOut(uint8_t milisecond) {
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
-        *reinterpret_cast<uint32_t*>(m_xfer_buffer.data()) = static_cast<uint32_t>(milisecond);
-        return Ioctl(SPI_IOCTL_SET_TIMEOUT, m_xfer_buffer.data(), 4, NULL, 0, NULL);
+        uint32_t timeout = static_cast<uint32_t>(milisecond);
+        return Ioctl(SPI_IOCTL_SET_TIMEOUT, &timeout, sizeof(timeout), NULL, 0, NULL);
     }
 
+    /**
+     * @brief 设置阻塞或非阻塞模式
+     * @param state true 为阻塞, false 为非阻塞
+     * @return bool 是否成功
+     */
     bool HalDevice::SetBlock(bool state) {
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
@@ -257,6 +384,11 @@ namespace Himax {
         return Ioctl(SPI_IOCTL_SET_BLOCK, m_xfer_buffer.data(), 4, NULL, 0, NULL);          
     }
 
+    /**
+     * @brief 设置设备复位状态
+     * @param state true 为拉高复位, false 为拉低复位
+     * @return bool 是否成功
+     */
     bool HalDevice::SetReset(bool state) {
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         
@@ -267,16 +399,28 @@ namespace Himax {
         return Ioctl(SPI_IOCTL_SET_RESET, m_xfer_buffer.data(), 4, NULL, 0, NULL);  
     }
 
+    /**
+     * @brief 打开中断监听
+     * @return bool 是否成功
+     */
     bool HalDevice::IntOpen(void) {
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         return Ioctl(SPI_IOCTL_INT_OPEN, NULL, 0, NULL, 0, NULL);
     }
 
+    /**
+     * @brief 关闭中断监听
+     * @return bool 是否成功
+     */
     bool HalDevice::IntClose(void) {
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         return Ioctl(SPI_IOCTL_INT_CLOSE, NULL, 0, NULL, 0, NULL);
     }
 
+    /**
+     * @brief 获取最后一次发生的错误码
+     * @return DWORD Windows 错误码
+     */
     DWORD HalDevice::GetError() {
         return m_lastError;
     }

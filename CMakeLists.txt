@@ -4,16 +4,28 @@ project(EGoTouchRev VERSION 0.1.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# --- SIMD options ---
+# This project targets a specific platform; enable NEON by default.
+option(HIMAX_ENABLE_NEON "Enable ARM NEON intrinsics when available" ON)
+
 # --- HimaxChipCore (Static Library) ---
 # 定义源文件和头文件路径
 set(HIMAX_CORE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/HimaxChipCore")
 file(GLOB HIMAX_CORE_SOURCES "${HIMAX_CORE_ROOT}/source/*.cpp")
 file(GLOB HIMAX_CORE_HEADERS "${HIMAX_CORE_ROOT}/header/*.h")
+file(GLOB HIMAX_CORE_HEADERS_HPP "${HIMAX_CORE_ROOT}/header/*.hpp")
 
 # 创建静态库
 add_library(HimaxChipCore STATIC
     ${HIMAX_CORE_SOURCES}
     ${HIMAX_CORE_HEADERS}
+    ${HIMAX_CORE_HEADERS_HPP}
+)
+
+# Define the switch for consumers; the header will still gate on actual arch macros.
+target_compile_definitions(HimaxChipCore PUBLIC
+    $<$<BOOL:${HIMAX_ENABLE_NEON}>:HIMAX_ENABLE_NEON=1>
+    $<$<NOT:$<BOOL:${HIMAX_ENABLE_NEON}>>:HIMAX_ENABLE_NEON=0>
 )
 
 # 设置包含目录，PUBLIC 属性使得链接此库的目标也能看到这些头文件

@@ -11,13 +11,56 @@
 #include <string>
 #include <synchapi.h>
 #include <vector>
+#include <windows.h>
 #include <wingdi.h>
 
 namespace {
+/**
+ * @brief 从32位整数中提取指定字节
+ * @param value 32位整数值
+ * @param index 字节索引 (0-3)
+ * @return 提取的字节值
+ */
 constexpr uint8_t ByteAt(uint32_t value, uint8_t index) noexcept {
     return static_cast<uint8_t>((value >> (index * 8)) & 0xFFu);
 }
 
+/**
+ * @brief 将数据范围格式化为十六进制字符串
+ * @param data 数据指针
+ * @param size 数据总大小
+ * @param begin 开始索引
+ * @param end_inclusive 结束索引（包含）
+ * @return 格式化后的十六进制字符串
+ */
+std::string FormatHexRange(const uint8_t* data, size_t size, size_t begin, size_t end_inclusive) {
+    if (!data) {
+        return "<null>";
+    }
+    if (begin >= size) {
+        return std::format("<out of range: begin={} size={}>", begin, size);
+    }
+    size_t end = end_inclusive;
+    if (end >= size) {
+        end = size - 1;
+    }
+
+    std::string out;
+    out.reserve((end - begin + 1) * 3);
+    for (size_t i = begin; i <= end; ++i) {
+        if (i != begin) {
+            out.push_back(' ');
+        }
+        out += std::format("{:02X}", static_cast<unsigned>(data[i]));
+    }
+    return out;
+}
+
+/**
+ * @brief 将32位整数以小端序写入4字节数组
+ * @param dest 目标数组
+ * @param value 要写入的值
+ */
 inline void WriteU32(uint8_t (&dest)[4], uint32_t value) noexcept {
     dest[0] = ByteAt(value, 0);
     dest[1] = ByteAt(value, 1);
@@ -25,6 +68,11 @@ inline void WriteU32(uint8_t (&dest)[4], uint32_t value) noexcept {
     dest[3] = ByteAt(value, 3);
 }
 
+/**
+ * @brief 将16位整数以小端序写入2字节数组
+ * @param dest 目标数组
+ * @param value 要写入的值
+ */
 inline void WriteU16(uint8_t (&dest)[2], uint16_t value) noexcept {
     dest[0] = static_cast<uint8_t>(value & 0xFFu);
     dest[1] = static_cast<uint8_t>((value >> 8) & 0xFFu);
@@ -35,6 +83,12 @@ std::ofstream* g_log_file = nullptr;
 
 namespace Himax {
 
+/**
+ * @brief 记录带有时间戳和函数名的日志
+ * @param message 日志消息
+ * @param func 函数名（可选）
+ * @return 格式化后的日志行
+ */
 std::string LogWithTimestamp(const std::string& message, const char* func) {
     using namespace std::chrono;
 
@@ -68,59 +122,7 @@ on_fw_operation InitOnFwOperation();
 on_flash_operation InitOnFlashOperation();
 on_sram_operation InitOnSramOperation();
 on_driver_operation InitOnDriverOperation();
-}
 
-Chip::Chip(const std::wstring& master_path, const std::wstring& slave_path, const std::wstring& interrupt_path)
-    : m_ic_op(InitIcOperation()),
-      m_fw_op(InitFwOperation()),
-      m_flash_op(InitFlashOperation()),
-      m_sram_op(InitSramOperation()),
-      m_driver_op(InitDriverOperation()),
-      m_zf_op(InitZfOperation()),
-      m_on_ic_op(InitOnIcOperation()),
-      m_on_fw_op(InitOnFwOperation()),
-      m_on_flash_op(InitOnFlashOperation()),
-      m_on_sram_op(InitOnSramOperation()),
-      m_on_driver_op(InitOnDriverOperation())
-{
-    m_master = std::make_unique<HalDevice>(master_path.c_str(), DeviceType::Master);
-    m_slave  = std::make_unique<HalDevice>(slave_path.c_str(), DeviceType::Slave);
-    m_interrupt = std::make_unique<HalDevice>(interrupt_path.c_str(), DeviceType::Interrupt);
-    
-    hx_mode = 0x105;
-    addr_unknown = 0x00;
-
-    InitLogFile();
-}
-
-void Chip::InitLogFile() {
-    namespace fs = std::filesystem;
-    using namespace std::chrono;
-
-    const auto today = floor<days>(system_clock::now());
-    const std::string date_str = std::format("{:%Y%m%d}", today);
-
-    const fs::path dir_path{"C:/ProgramData/EGoTouchRev/"};
-    std::error_code ec;
-    fs::create_directories(dir_path, ec);
-
-    const fs::path file_path = dir_path / std::format("hx_hal_log_{}", date_str);
-    const bool existed = fs::exists(file_path);
-
-    m_logFile.open(file_path, std::ios::out | std::ios::app);
-    if (m_logFile.is_open()) {
-        g_log_file = &m_logFile;
-        if (existed) {
-            const std::string sep(40, '-');
-            m_logFile << sep << '\n'
-                      << '\n' << '\n' << '\n' << '\n' << '\n'
-                      << sep << '\n';
-            m_logFile.flush();
-        }
-    }
-}
-
-namespace {
 ic_operation InitIcOperation() {
     ic_operation op{};
     op.addr_ahb_addr_byte_0[0] = 0x00;
@@ -434,9 +436,71 @@ on_driver_operation InitOnDriverOperation() {
     return op;
 }
 
+}
+
+Chip::Chip(const std::wstring& master_path, const std::wstring& slave_path, const std::wstring& interrupt_path)
+    : m_ic_op(InitIcOperation()),
+      m_fw_op(InitFwOperation()),
+      m_flash_op(InitFlashOperation()),
+      m_sram_op(InitSramOperation()),
+      m_driver_op(InitDriverOperation()),
+      m_zf_op(InitZfOperation()),
+      m_on_ic_op(InitOnIcOperation()),
+      m_on_fw_op(InitOnFwOperation()),
+      m_on_flash_op(InitOnFlashOperation()),
+      m_on_sram_op(InitOnSramOperation()),
+      m_on_driver_op(InitOnDriverOperation())
+{
+    m_master = std::make_unique<HalDevice>(master_path.c_str(), DeviceType::Master);
+    m_slave = std::make_unique<HalDevice>(slave_path.c_str(), DeviceType::Slave);
+    m_interrupt = std::make_unique<HalDevice>(interrupt_path.c_str(), DeviceType::Interrupt);
+
+    hx_mode = 0x105;
+    addr_unknown = 0x00;
+    m_status = THP_AFE_STATUS::BUS_FAIL;
+
+    InitLogFile();
+}
+
+void Chip::InitLogFile() {
+    namespace fs = std::filesystem;
+    using namespace std::chrono;
+
+    const auto today = floor<days>(system_clock::now());
+    const std::string date_str = std::format("{:%Y%m%d}", today);
+
+    const fs::path dir_path{"C:/ProgramData/EGoTouchRev/"};
+    std::error_code ec;
+    fs::create_directories(dir_path, ec);
+
+    const fs::path file_path = dir_path / std::format("hx_hal_log_{}", date_str);
+    const bool existed = fs::exists(file_path);
+
+    m_logFile.open(file_path, std::ios::out | std::ios::app);
+    if (m_logFile.is_open()) {
+        g_log_file = &m_logFile;
+        if (existed) {
+            const std::string sep(40, '-');
+            m_logFile << sep << '\n'
+                      << '\n' << '\n' << '\n' << '\n' << '\n'
+                      << sep << '\n';
+            m_logFile.flush();
+        }
+    }
+}
+
+namespace {
+/**
+ * @brief 启用或禁用突发传输模式
+ * @param dev 设备指针
+ * @param state 状态 (1 为启用, 0 为禁用)
+ * @return bool 操作是否成功
+ */
 bool burst_enable(HalDevice* dev, uint8_t state) {
-    if (!dev || !dev->IsValid()) return false;
-    
+    if (!dev || !dev->IsValid()) {
+        return false;
+    }
+
     bool res = false;
     uint8_t tmp_data[4];
 
@@ -447,21 +511,29 @@ bool burst_enable(HalDevice* dev, uint8_t state) {
         dev->GetError();
         return false;
     }
-    
+
     tmp_data[0] = 0x31;
-    
+
     res = dev->WriteBus(0x13, NULL, tmp_data, 1);
     if (!res) {
         dev->GetError();
         return false;
     }
-    
     return res;
-    
 }
 
+/**
+ * @brief 从指定地址读取寄存器数据
+ * @param dev 设备指针
+ * @param addr 寄存器地址 (4字节)
+ * @param buffer 接收数据的缓冲区
+ * @param len 读取长度
+ * @return bool 操作是否成功
+ */
 bool register_read(HalDevice* dev, const uint8_t* addr, uint8_t* buffer, uint32_t len) {
-    if (!dev || !dev->IsValid()) return false;
+    if (!dev || !dev->IsValid()) {
+        return false;
+    }
     bool res  = false;
 
     const uint8_t addr_ahb_addr_byte_0 = 0x00;
@@ -475,8 +547,11 @@ bool register_read(HalDevice* dev, const uint8_t* addr, uint8_t* buffer, uint32_
         return false;
     }
 
-    res = dev->WriteBus(addr_ahb_access_direction, NULL, 
-        data_ahb_access_direction_read, 1);
+    res = dev->WriteBus(
+        addr_ahb_access_direction,
+        NULL,
+        data_ahb_access_direction_read,
+        1);
     if (!res) {
         dev->GetError();
         return false;
@@ -490,6 +565,12 @@ bool register_read(HalDevice* dev, const uint8_t* addr, uint8_t* buffer, uint32_
     return res;
 }
 
+/**
+ * @brief 构建用于发送命令的 16 字节数据包
+ * @param param_1 命令参数 1
+ * @param param_3 命令参数 3
+ * @param output_buffer 输出缓冲区 (至少 16 字节)
+ */
 void build_local_60_packet(uint8_t param_1, uint8_t param_3, uint8_t* output_buffer) {
     // 1. 初始化缓冲区为 0 (对应 local_5b = 0, local_50 = 0 等初始化)
     for (int i = 0; i < 16; i++) {
@@ -528,6 +609,14 @@ void build_local_60_packet(uint8_t param_1, uint8_t param_3, uint8_t* output_buf
     output_buffer[1] = 0x00;
 }
 
+/**
+ * @brief 向指定地址写入寄存器数据
+ * @param dev 设备指针
+ * @param addr 寄存器地址 (4字节)
+ * @param val 要写入的数据
+ * @param len 写入长度
+ * @return bool 操作是否成功
+ */
 bool register_write(HalDevice* dev, const uint8_t* addr, const uint8_t* val, uint32_t len) {
     if (!dev || !dev->IsValid()) return false;
 
@@ -540,6 +629,15 @@ bool register_write(HalDevice* dev, const uint8_t* addr, const uint8_t* val, uin
     return dev->WriteBus(0x00, addr, val, len);
 }
 
+/**
+ * @brief 写入寄存器并读取校验
+ * @param dev 设备指针
+ * @param addr 寄存器地址
+ * @param data 要写入的数据
+ * @param len 写入长度
+ * @param verify_len 校验长度 (0 表示自动判断)
+ * @return bool 写入且校验成功返回 true
+ */
 bool write_and_verify(HalDevice* dev, const uint8_t* addr, const uint8_t* data, uint32_t len, uint32_t verify_len = 0) {
     if (!dev || !dev->IsValid()) return false;
 
@@ -626,24 +724,46 @@ bool safeModeSetRaw_intf(HalDevice* dev, const bool state) {
 }
 } // namespace
 
+/**
+ * @brief 根据设备类型选择对应的 HalDevice 指针
+ * @param type 设备类型 (Master/Slave/Interrupt)
+ * @return HalDevice* 设备指针，若类型无效则返回 nullptr
+ */
 HalDevice* Chip::SelectDevice(DeviceType type) {
     switch (type) {
-    case DeviceType::Master: return m_master.get();
-    case DeviceType::Slave: return m_slave.get();
-    case DeviceType::Interrupt: return m_interrupt.get();
-    default: return nullptr;
+    case DeviceType::Master:
+        return m_master.get();
+    case DeviceType::Slave:
+        return m_slave.get();
+    case DeviceType::Interrupt:
+        return m_interrupt.get();
+    default:
+        return nullptr;
     }
 }
 
+/**
+ * @brief 检查指定类型的设备是否已就绪且有效
+ * @param type 设备类型
+ * @return bool 是否就绪
+ */
 bool Chip::IsReady(DeviceType type) const {
     switch (type) {
-    case DeviceType::Master: return m_master && m_master->IsValid();
-    case DeviceType::Slave: return m_slave && m_slave->IsValid();
-    case DeviceType::Interrupt: return m_interrupt && m_interrupt->IsValid();
-    default: return false;
+    case DeviceType::Master:
+        return m_master && m_master->IsValid();
+    case DeviceType::Slave:
+        return m_slave && m_slave->IsValid();
+    case DeviceType::Interrupt:
+        return m_interrupt && m_interrupt->IsValid();
+    default:
+        return false;
     }
 }
 
+/**
+ * @brief 检查主从设备的总线连接状态
+ * @return bool 主从设备总线均正常返回 true
+ */
 bool Chip::check_bus(void) {
     bool slave_ok = false;
     bool master_ok = false;
@@ -671,6 +791,10 @@ bool Chip::check_bus(void) {
     return slave_ok && master_ok;
 }
 
+/**
+ * @brief 初始化缓冲区和寄存器设置
+ * @return bool 是否成功
+ */
 bool Chip::init_buffers_and_register(void) {
     std::vector<uint8_t> tmp_data(0x50, 0);
     uint8_t tmp_register[4] = {0x50, 0x75, 0x00, 0x10};
@@ -682,13 +806,18 @@ bool Chip::init_buffers_and_register(void) {
     return true;
 }
 
+/**
+ * @brief 向芯片发送特定命令包
+ * @param param_1 命令参数 1
+ * @param param_3 命令参数 3
+ * @return bool 是否成功
+ */
 bool Chip::hx_send_command(uint8_t param_1, uint8_t param_3) {
     std::vector<uint8_t> tmp_data(16, 0);
     uint32_t addr = 0x1000755;
     uint8_t tmp_addr[4]{};
     WriteU32(tmp_addr, (addr + current_slot) * 10);
 
-    
     build_local_60_packet(param_1, param_3, tmp_data.data());
     register_write(m_master.get(), tmp_addr, tmp_data.data(), tmp_data.size());
 
@@ -701,23 +830,46 @@ bool Chip::hx_send_command(uint8_t param_1, uint8_t param_3) {
     return true;
 }
 
+/**
+ * @brief 清除 AFE 状态
+ * @param param_1 参数
+ * @return bool 是否成功
+ */
 bool Chip::thp_afe_clear_status(uint8_t param_1) {
     return hx_send_command(6, param_1);
 }
 
+/**
+ * @brief 设置原始数据输出类型
+ * @param device 设备类型
+ * @param type 数据类型模式 (如 0x100, 0x105 等)
+ * @return bool 是否成功
+ */
 bool Chip::hx_set_raw_data_type(DeviceType device, uint32_t type) {
     HalDevice* dev = SelectDevice(device);
-    if (!dev || !dev->IsValid()) return false;
+    if (!dev || !dev->IsValid()) {
+        return false;
+    }
 
     std::vector<uint8_t> tmp_data(4, 0);
     
     switch (type) {
-        case 0x100: tmp_data[0] = 0x0B; break;
-        case 0x101:
-        case 0x102: tmp_data[0] = 0x0A; break;
-        case 0x103: tmp_data[0] = 0x0F; break;
-        case 0x105: tmp_data[0] = 0xF6; break;
-        default:    tmp_data[0] = type; break;
+    case 0x100:
+        tmp_data[0] = 0x0B;
+        break;
+    case 0x101:
+    case 0x102:
+        tmp_data[0] = 0x0A;
+        break;
+    case 0x103:
+        tmp_data[0] = 0x0F;
+        break;
+    case 0x105:
+        tmp_data[0] = 0xF6;
+        break;
+    default:
+        tmp_data[0] = type;
+        break;
     }
 
     bool step_ok = false;
@@ -753,9 +905,16 @@ bool Chip::hx_set_raw_data_type(DeviceType device, uint32_t type) {
     return true;
 }
 
+/**
+ * @brief 执行硬件复位 AHB 接口
+ * @param type 设备类型
+ * @return bool 是否成功
+ */
 bool Chip::hx_hw_reset_ahb_intf(DeviceType type) {
     HalDevice* dev = SelectDevice(type);
-    if (!dev || !dev->IsValid()) return false;
+    if (!dev || !dev->IsValid()) {
+        return false;
+    }
 
     bool res = true;
     message = std::format("Enter!");
@@ -767,23 +926,36 @@ bool Chip::hx_hw_reset_ahb_intf(DeviceType type) {
     res = res && step_ok;
 
     step_ok = dev->SetReset(0);
-    if (!step_ok) HIMAX_LOG("SetReset(0) failed");
+    if (!step_ok) {
+        HIMAX_LOG("SetReset(0) failed");
+    }
     res = res && step_ok;
 
     step_ok = dev->SetReset(1);
-    if (!step_ok) HIMAX_LOG("SetReset(1) failed");
+    if (!step_ok) {
+        HIMAX_LOG("SetReset(1) failed");
+    }
     res = res && step_ok;
 
     step_ok = burst_enable(dev, 1);
-    if (!step_ok) HIMAX_LOG("burst_enable set to 1 failed");
+    if (!step_ok) {
+        HIMAX_LOG("burst_enable set to 1 failed");
+    }
     res = res && step_ok;
 
     return res;
 }
 
+/**
+ * @brief 执行软件复位 AHB 接口
+ * @param type 设备类型
+ * @return bool 是否成功
+ */
 bool Chip::hx_sw_reset_ahb_intf(DeviceType type) {
     HalDevice* dev = SelectDevice(type);
-    if (!dev || !dev->IsValid()) return false;
+    if (!dev || !dev->IsValid()) {
+        return false;
+    }
 
     // 尝试5次进入safe mode，每次尝试sleep(10)
     bool safe_mode_ok = false;
@@ -799,7 +971,7 @@ bool Chip::hx_sw_reset_ahb_intf(DeviceType type) {
     if (!safe_mode_ok) {
         HIMAX_LOG("Failed to enter Safe Mode before reset, proceeding anyway...");
     }
-    
+
     Sleep(10);
 
     // 清空addr_fw_define_2nd_flash_reload，不尝试，失败输出clean reload done failed!，立即返回
@@ -817,12 +989,17 @@ bool Chip::hx_sw_reset_ahb_intf(DeviceType type) {
     }
 
     Sleep(100);
-    
+
     burst_enable(dev, 1);
 
     return true;
 }
 
+/**
+ * @brief 设置 Flash 重载状态
+ * @param state 状态 (0 为禁用, 非 0 为启用)
+ * @return bool 是否成功
+ */
 bool Chip::hx_reload_set(uint8_t state) {
     bool res = false;
     const bool enable = (state != 0);
@@ -845,6 +1022,11 @@ bool Chip::hx_reload_set(uint8_t state) {
     return res;
 }
 
+/**
+ * @brief 设置 N 帧参数
+ * @param nFrame 帧数
+ * @return bool 是否成功
+ */
 bool Chip::hx_set_N_frame(uint8_t nFrame) {
     if (!m_master || !m_master->IsValid()) return false;
 
@@ -868,6 +1050,11 @@ bool Chip::hx_set_N_frame(uint8_t nFrame) {
     return true;
 }
 
+/**
+ * @brief 切换芯片工作模式
+ * @param mode 目标模式 (如 0x100: normal, 0x103: sorting 等)
+ * @return bool 是否成功
+ */
 bool Chip::hx_switch_mode(uint32_t mode) {
     constexpr int kUnlockAttempts = 20;
     constexpr int kWriteAttempts = 20;
@@ -930,6 +1117,10 @@ bool Chip::hx_switch_mode(uint32_t mode) {
     return wrote;
 }
 
+/**
+ * @brief 检查 Flash 重载是否完成
+ * @return bool 完成返回 true
+ */
 bool Chip::hx_is_reload_done_ahb(void) {
     std::vector<uint8_t> tmp_data(4, 0);
     bool step = register_read(m_master.get(), m_driver_op.addr_fw_define_2nd_flash_reload, tmp_data.data(), 4);
@@ -940,6 +1131,11 @@ bool Chip::hx_is_reload_done_ahb(void) {
     }
 }
 
+/**
+ * @brief 开启感应模式
+ * @param isHwReset 是否执行硬件复位
+ * @return bool 是否成功
+ */
 bool Chip::hx_sense_on(bool isHwReset) {
     message = std::format("hx_sense_on: isHwReset = {}", isHwReset);
     HIMAX_LOG(message);
@@ -993,8 +1189,8 @@ bool Chip::hx_sense_on(bool isHwReset) {
             step_ok = false;
             attempt++;
         }
-    }while (attempt < 5);
-    
+    } while (attempt < 5);
+
     if (step_ok) {
         for (int retry = 0; retry < 50; retry++) {
             if (hx_is_reload_done_ahb()) {
@@ -1003,7 +1199,7 @@ bool Chip::hx_sense_on(bool isHwReset) {
             }
             Sleep(1);
         }
-    
+
         if (step_ok) {
             hx_set_raw_data_type(DeviceType::Master, hx_mode);
             hx_set_raw_data_type(DeviceType::Slave, hx_mode);
@@ -1011,7 +1207,7 @@ bool Chip::hx_sense_on(bool isHwReset) {
             HIMAX_LOG("OUT!");
             return true;
         }
-    //这里的else逻辑还有待确认
+        //这里的else逻辑还有待确认
     } else {
         tmp_data.clear();
         tmp_data.resize(4, 0);
@@ -1023,11 +1219,16 @@ bool Chip::hx_sense_on(bool isHwReset) {
         HIMAX_LOG("OUT!");
         return false;
     }
-    
+
     HIMAX_LOG("hx_sense_on timeout");
     return false; // 启动超时
 }
 
+/**
+ * @brief 关闭感应模式
+ * @param check_en 是否检查固件状态
+ * @return bool 是否成功
+ */
 bool Chip::hx_sense_off(bool check_en) {
     bool step_ok = false;
     bool state = true;
@@ -1047,9 +1248,9 @@ bool Chip::hx_sense_off(bool check_en) {
         }
 
         register_read(m_master.get(), m_fw_op.addr_ctrl_fw_isr, tmp_data.data(), 4);
-        
+
     }while (tmp_data[0] != 0x87 && (++cnt < 20) && check_en);
-    
+
 
     cnt = 0;
     tmp_data.fill(0);
@@ -1085,64 +1286,83 @@ bool Chip::hx_sense_off(bool check_en) {
     return step_ok;
 }
 
+/**
+ * @brief 启动 AFE 状态机循环
+ */
 void Chip::thp_afe_start(void) {
-    hx_hw_reset_ahb_intf(DeviceType::Slave);
-    hx_hw_reset_ahb_intf(DeviceType::Master);
+    bool step_ok = false;
+    std::array<uint8_t, 339> tmp_buffer1{};
+    std::array<uint8_t, 5063> tmp_buffer2{};
 
-    //不尝试，成功SpiSetReset set high,失败SpiSetReset set high failed!
-    m_master->SetReset(1);
-
-    Sleep(0x19);
-    bool THP_AFE_STATE = check_bus();
-    if (!THP_AFE_STATE) {
-        throw ERROR;
-    }
-    burst_enable(m_master.get(), 1);
-    
-    init_buffers_and_register();
-    
-    //hx_sense_on
-    hx_sense_on(true);
-    m_master->IntOpen();
-    m_slave->IntOpen();
-    //打开两个设备的中断
-
-    //清空buffer
-    std::vector<uint8_t> tmp_buffer1(5063);
-    std::vector<uint8_t> tmp_buffer2(339);
-
-    for (int cnt = 0; cnt < 3; cnt++) {
-        if (m_slave->GetFrame(tmp_buffer2.data(), 339, nullptr)) {
-            m_slave->IntOpen();
+    while (true) {
+        HIMAX_LOG("change");
+        switch (m_status) {
+        case THP_AFE_STATUS::BUS_FAIL:
+            goto bus_fail;
+        case THP_AFE_STATUS::INITIALZING:
+            goto init;
+        case THP_AFE_STATUS::CHANGE:
+            goto change;
+        case THP_AFE_STATUS::RUNNING:
+            goto runing;
+        case THP_AFE_STATUS::STOP:
+            goto stop;
+        case THP_AFE_STATUS::FATAL_ERROR:
+            goto error;
         }
-        if (m_master->GetFrame(tmp_buffer1.data(), 5063, nullptr)) {
-            m_master->IntOpen();
+
+    bus_fail:
+        HIMAX_LOG("bus_fail");
+        hx_hw_reset_ahb_intf(DeviceType::Slave);
+        hx_hw_reset_ahb_intf(DeviceType::Master);
+
+        //不尝试，成功SpiSetReset set high,失败SpiSetReset set high failed!
+        m_master->SetReset(1);
+
+        Sleep(0x19);
+
+        if (!check_bus()) {
+            m_status = THP_AFE_STATUS::FATAL_ERROR;
         }
-        
-    }
+        burst_enable(m_master.get(), 1);
+        m_status = THP_AFE_STATUS::INITIALZING;
+        continue;
 
+    init:
+        HIMAX_LOG("init");
+        init_buffers_and_register();
+        hx_sense_on(true);
+        m_master->IntOpen();
+        m_slave->IntOpen();
+        m_status = THP_AFE_STATUS::CHANGE;
+        continue;
+
+    change:
+        m_status = THP_AFE_STATUS::RUNNING;
+
+    runing:
+        HIMAX_LOG("runing!");
+        while (m_status == THP_AFE_STATUS::RUNNING) {
+            m_status = THP_AFE_STATUS::RUNNING;
+
+            m_interrupt->WaitInterrupt();
+            m_slave->GetFrame(tmp_buffer1.data(), 339, NULL);
+            m_master->GetFrame(tmp_buffer2.data(), 5063, NULL);
+
+                HIMAX_LOG(std::format(
+                "tmp_buffer2[{}..{}] = {}",
+                100,
+                200,
+                FormatHexRange(tmp_buffer2.data(), tmp_buffer2.size(), 100, 200)));
+        }
+
+            stop:
+        hx_sense_off(false);
+        return;
+
+            error:
+        return;
 }
 
-bool Chip::WaitInterrupt() {
-    if (m_interrupt && m_interrupt->IsValid()) {
-        return m_interrupt->WaitInterrupt();
-    }
-    return false;
-}
-
-bool Chip::GetMasterData(std::vector<uint8_t>& buffer) {
-    if (m_master && m_master->IsValid()) {
-        uint32_t retLen = 0;
-        return m_master->GetFrame(buffer.data(), static_cast<uint32_t>(buffer.size()), &retLen);
-    }
-    return false;
-}
-
-bool Chip::GetSlaveData(std::vector<uint8_t>& buffer) {
-    if (m_slave && m_slave->IsValid()) {
-        uint32_t retLen = 0;
-        return m_slave->GetFrame(buffer.data(), static_cast<uint32_t>(buffer.size()), &retLen);
-    }
-    return false;
 }
 } // namespace Himax
