@@ -1,13 +1,13 @@
 EGoTouch-Rev
 ======================
 
-**EGoTouch-Rev** 是针对 **Huawei Matebook E Go (Windows on Arm64)** 设备触摸屏驱动服务的高性能重构项目。
+**EGoTouch-Rev** 是针对 **Matebook E Go (Windows on Arm64)** 设备触摸屏驱动服务的高性能重构项目。
 
 本项目的目标是替代原厂效率较低的 `HuaweiThpService.exe`，通过原生 C++23 直接与底层 SPI 驱动通信，实现更低延迟的触摸响应和更稳定的热力图（Heatmap）处理，彻底消除“鬼影”触控问题。
 核心硬件与架构
 -------
 
-* **目标设备**: Huawei Matebook E Go (2022性能版)
+* **目标设备**: Matebook E Go (2022性能版)
 
 * **Touch IC**: Himax HX83121A (SPI Interface)
 
