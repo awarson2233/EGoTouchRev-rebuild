@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <format>
 #include <fstream>
 #include <iostream>
@@ -456,8 +457,8 @@ Chip::Chip(const std::wstring& master_path, const std::wstring& slave_path, cons
     m_interrupt = std::make_unique<HalDevice>(interrupt_path.c_str(), DeviceType::Interrupt);
 
     hx_mode = 0x105;
-    addr_unknown = 0x00;
     m_status = THP_AFE_STATUS::BUS_FAIL;
+    isRuning = false;
 
     InitLogFile();
 }
@@ -490,6 +491,32 @@ void Chip::InitLogFile() {
 }
 
 namespace {
+
+void himax_parse_assign_cmd(uint32_t addr, uint8_t *cmd, int len)
+{
+
+	switch (len) {
+	case 1:
+		cmd[0] = addr;
+		break;
+
+	case 2:
+		cmd[0] = addr & 0xFF;
+		cmd[1] = (addr >> 8) & 0xFF;
+		break;
+
+	case 4:
+		cmd[0] = addr & 0xFF;
+		cmd[1] = (addr >> 8) & 0xFF;
+		cmd[2] = (addr >> 16) & 0xFF;
+		cmd[3] = (addr >> 24) & 0xFF;
+		break;
+
+	default:
+		HIMAX_LOG(std::format("input length fault, len = {:d}!", len));
+	}
+}
+
 /**
  * @brief 启用或禁用突发传输模式
  * @param dev 设备指针
@@ -566,47 +593,49 @@ bool register_read(HalDevice* dev, const uint8_t* addr, uint8_t* buffer, uint32_
 }
 
 /**
- * @brief 构建用于发送命令的 16 字节数据包
- * @param param_1 命令参数 1
- * @param param_3 命令参数 3
- * @param output_buffer 输出缓冲区 (至少 16 字节)
+ * @brief 构建用于发送命令的 16 字节和 2 字节校验位数据包
+ * @param cmd_id 命令参数 1
+ * @param cmd_val 命令参数 3
+ * @param output_buffer 输出缓冲区 (至少 18 字节)
  */
-void build_local_60_packet(uint8_t param_1, uint8_t param_3, uint8_t* output_buffer) {
-    // 1. 初始化缓冲区为 0 (对应 local_5b = 0, local_50 = 0 等初始化)
-    for (int i = 0; i < 16; i++) {
-        output_buffer[i] = 0;
+void build_command_packet(uint8_t cmd_id, uint8_t cmd_val, uint8_t* packet) {
+    if (!packet) {
+        return;
     }
 
+    // 1. 初始化缓冲区为 0 (对应 local_5b = 0, local_50 = 0 等初始化)
+    std::array<uint8_t, 18> tmp_data{};
+
     // 2. 设置包含“虚拟包头”的初始值，用于计算 CheckSum
-    output_buffer[0] = 0xA8;     // local_60[0]
-    output_buffer[1] = 0x8A;     // local_60[1]
-    output_buffer[2] = param_1;  // local_60[2]
-    output_buffer[3] = 0x00;     // local_60[3]
-    output_buffer[4] = param_3;  // local_60[4]
+    tmp_data[0] = 0xA8;     // local_60[0]
+    tmp_data[1] = 0x8A;     // local_60[1]
+    tmp_data[2] = cmd_id;  // local_60[2]
+    tmp_data[3] = 0x00;     // local_60[3]
+    tmp_data[4] = cmd_val;  // local_60[4]
     
     // 3. 计算 CheckSum (iVar13)
     // 逻辑：将 16 字节看作 8 个 uint16 (小端序) 进行累加
     uint32_t checksum_sum = 0;
-    
     for (int i = 0; i < 16; i += 2) {
-        // 组合低字节和高字节 (Little Endian)
-        // bVar3 = buffer[i]; *pbVar1 = buffer[i+1];
-        uint16_t word = output_buffer[i] | (output_buffer[i+1] << 8);
+        // 组合低字节和高字节为 16位 整数
+        uint16_t word = static_cast<uint16_t>(tmp_data[i]) |
+                        (static_cast<uint16_t>(tmp_data[i + 1]) << 8);
         checksum_sum += word;
     }
 
-    // 4. 计算最终校验值 (对应: 0x10000 - iVar13)
-    // 注意：这里只取低16位有效值
-    uint16_t final_checksum = (uint16_t)(0x10000 - checksum_sum);
+    // 4. 计算补码 (Two's Complement)
+    // 逻辑：0x10000 - Sum，并截断为 16 位
+    uint16_t final_checksum = static_cast<uint16_t>((0x10000 - checksum_sum) & 0xFFFF);
 
-    // 5. 填入 CheckSum 到 buffer 末尾 (Index 14, 15)
-    // 根据分析：是 Little Endian 写入
-    output_buffer[14] = final_checksum & 0xFF;        // 低字节 (0x4A)
-    output_buffer[15] = (final_checksum >> 8) & 0xFF; // 高字节 (0x75)
+    // 5. 填入校验和 (Little Endian)
+    tmp_data[16] = final_checksum & 0xFF;         // Low Byte
+    tmp_data[17] = (final_checksum >> 8) & 0xFF;  // High Byte
 
     // 6. 关键步骤：发送前清除包头
-    output_buffer[0] = 0x00;
-    output_buffer[1] = 0x00;
+    tmp_data[0] = 0x00;
+    tmp_data[1] = 0x00;
+
+    std::memcpy(packet, tmp_data.data(), tmp_data.size());
 }
 
 /**
@@ -812,13 +841,13 @@ bool Chip::init_buffers_and_register(void) {
  * @param param_3 命令参数 3
  * @return bool 是否成功
  */
-bool Chip::hx_send_command(uint8_t param_1, uint8_t param_3) {
+bool Chip::hx_send_command(uint8_t cmd_id, uint8_t cmd_val) {
     std::vector<uint8_t> tmp_data(16, 0);
     uint32_t addr = 0x1000755;
     uint8_t tmp_addr[4]{};
     WriteU32(tmp_addr, (addr + current_slot) * 10);
 
-    build_local_60_packet(param_1, param_3, tmp_data.data());
+    hx_send_command(cmd_id, cmd_val);
     register_write(m_master.get(), tmp_addr, tmp_data.data(), tmp_data.size());
 
     tmp_data[0] = 0xa8;
@@ -839,36 +868,30 @@ bool Chip::thp_afe_clear_status(uint8_t param_1) {
     return hx_send_command(6, param_1);
 }
 
-/**
- * @brief 设置原始数据输出类型
- * @param device 设备类型
- * @param type 数据类型模式 (如 0x100, 0x105 等)
- * @return bool 是否成功
- */
-bool Chip::hx_set_raw_data_type(DeviceType device, uint32_t type) {
+bool Chip::hx_set_raw_data_type(DeviceType device, THP_AFE_MODE mode) {
     HalDevice* dev = SelectDevice(device);
     if (!dev || !dev->IsValid()) {
         return false;
     }
-
+    std::string tmp_string;
     std::vector<uint8_t> tmp_data(4, 0);
     
-    switch (type) {
-    case 0x100:
-        tmp_data[0] = 0x0B;
-        break;
-    case 0x101:
-    case 0x102:
-        tmp_data[0] = 0x0A;
-        break;
-    case 0x103:
-        tmp_data[0] = 0x0F;
-        break;
-    case 0x105:
+    switch (mode) {
+    case THP_AFE_MODE::HX_RAWDATA:
         tmp_data[0] = 0xF6;
+        tmp_string = "HX_RAWDATA";
+        break;
+    case THP_AFE_MODE::HX_ACT_IDLE_RAWDATA:
+        tmp_data[0] = 0x0A;
+        tmp_string = "HX_ACT_IDLE_RAWDATA";
+        break;
+    case Himax::THP_AFE_MODE::HX_LP_IDLE_RAWDATA:
+        tmp_data[0] = 0x0A;
+        tmp_string = "HX_LP_IDLE_RAWDATA";
         break;
     default:
-        tmp_data[0] = type;
+        tmp_data[0] = 0xF6;
+        tmp_string = "HX_RAWDATA";
         break;
     }
 
@@ -900,7 +923,7 @@ bool Chip::hx_set_raw_data_type(DeviceType device, uint32_t type) {
         HIMAX_LOG("Failed to write SRAM password (0x5AA5)");
     }
 
-    message = std::format("set raw data out select: 0x{:02X}", type);
+    message = std::format("set raw data out select: {:s}", tmp_string);
     HIMAX_LOG(message);
     return true;
 }
@@ -1050,47 +1073,43 @@ bool Chip::hx_set_N_frame(uint8_t nFrame) {
     return true;
 }
 
-/**
- * @brief 切换芯片工作模式
- * @param mode 目标模式 (如 0x100: normal, 0x103: sorting 等)
- * @return bool 是否成功
- */
-bool Chip::hx_switch_mode(uint32_t mode) {
+bool Chip::hx_switch_mode(THP_AFE_MODE mode) {
     constexpr int kUnlockAttempts = 20;
     constexpr int kWriteAttempts = 20;
+    std::array<uint8_t, 4> tmp_data{};
 
     bool clear = false;
-    clear = write_and_verify(m_master.get(), m_sram_op.addr_rawdata_addr, m_sram_op.addr_rawdata_end, 4, 2);
+    for (size_t i = 0; i < 20; i++) {
+        clear = write_and_verify(m_master.get(), m_sram_op.addr_rawdata_addr, m_sram_op.addr_rawdata_end, 4, 2);
+        if (clear) {
+            break;
+        }
+    }
     if (!clear) {
         message = std::format("switch mode unlock failed after {} attempts", kUnlockAttempts);
         HIMAX_LOG(message);
         return false;
     }
 
-    uint8_t tmp_data[4]{};
-    const uint8_t* src = nullptr;
     switch (mode) {
-    case 0x100: // normal
-        src = m_fw_op.data_normal_mode;
+    case THP_AFE_MODE::HX_RAWDATA: // normal
+        tmp_data[0] = 0x00;
+        tmp_data[1] = 0x00;
         break;
-    case 0x101: // open
-        src = m_fw_op.data_open_mode;
+    case THP_AFE_MODE::HX_ACT_IDLE_RAWDATA: // open
+        tmp_data[0] = 0x22;
+        tmp_data[1] = 0x22;
         break;
-    case 0x102: // short
-        src = m_fw_op.data_short_mode;
-        break;
-    case 0x103: // sorting
-        src = m_fw_op.data_sorting_mode;
+    case THP_AFE_MODE::HX_LP_IDLE_RAWDATA: // short
+        tmp_data[0] = 0x50;
+        tmp_data[1] = 0x50;
         break;
     default:
-        message = std::format("undefined mode: 0x{:02X}, fallback to normal", mode);
+        message = std::format("undefined mode, fallback to normal");
         HIMAX_LOG(message);
-        src = m_fw_op.data_normal_mode;
+        tmp_data[0] = 0x00;
+        tmp_data[0] = 0x00;
         break;
-    }
-
-    for (size_t i = 0; i < 4; ++i) {
-        tmp_data[i] = src[i];
     }
 
     const uint32_t password =
@@ -1101,7 +1120,7 @@ bool Chip::hx_switch_mode(uint32_t mode) {
 
     bool wrote = false;
     for (int attempt = 0; attempt < kWriteAttempts; ++attempt) {
-        if (write_and_verify(m_master.get(), m_fw_op.addr_sorting_mode_en, tmp_data, 4)) {
+        if (write_and_verify(m_master.get(), m_fw_op.addr_sorting_mode_en, tmp_data.data(), 4)) {
             wrote = true;
             break;
         }
@@ -1163,7 +1182,7 @@ bool Chip::hx_sense_on(bool isHwReset) {
         message = std::format("hx_reload_set (false) failed");
     }
     //hx_mode待找出,还要添加试错和sleep
-    step_ok = hx_switch_mode(hx_mode);
+    step_ok = hx_switch_mode(m_mode);
 
     // 3. 执行复位，并读取addr_sts_chk，尝试5次
     uint8_t attempt = 0;
@@ -1201,8 +1220,8 @@ bool Chip::hx_sense_on(bool isHwReset) {
         }
 
         if (step_ok) {
-            hx_set_raw_data_type(DeviceType::Master, hx_mode);
-            hx_set_raw_data_type(DeviceType::Slave, hx_mode);
+            hx_set_raw_data_type(DeviceType::Master, m_mode);
+            hx_set_raw_data_type(DeviceType::Slave, m_mode);
             Sleep(0x14);
             HIMAX_LOG("OUT!");
             return true;
@@ -1293,6 +1312,7 @@ void Chip::thp_afe_start(void) {
     bool step_ok = false;
     std::array<uint8_t, 339> tmp_buffer1{};
     std::array<uint8_t, 5063> tmp_buffer2{};
+    uint8_t cnt = 0;
 
     while (true) {
         HIMAX_LOG("change");
@@ -1323,6 +1343,7 @@ void Chip::thp_afe_start(void) {
 
         if (!check_bus()) {
             m_status = THP_AFE_STATUS::FATAL_ERROR;
+            continue;
         }
         burst_enable(m_master.get(), 1);
         m_status = THP_AFE_STATUS::INITIALZING;
@@ -1342,25 +1363,25 @@ void Chip::thp_afe_start(void) {
 
     runing:
         HIMAX_LOG("runing!");
-        while (m_status == THP_AFE_STATUS::RUNNING) {
+        while (isRuning) {
             m_status = THP_AFE_STATUS::RUNNING;
 
             m_interrupt->WaitInterrupt();
             m_slave->GetFrame(tmp_buffer1.data(), 339, NULL);
             m_master->GetFrame(tmp_buffer2.data(), 5063, NULL);
-
-                HIMAX_LOG(std::format(
-                "tmp_buffer2[{}..{}] = {}",
-                100,
-                200,
-                FormatHexRange(tmp_buffer2.data(), tmp_buffer2.size(), 100, 200)));
+            
+            HIMAX_LOG(std::format(
+            "tmp_buffer2[{}..{}] = {}",
+            100,
+            200,
+            FormatHexRange(tmp_buffer2.data(), tmp_buffer2.size(), 100, 200)));
         }
-
-            stop:
+        continue;
+    stop:
         hx_sense_off(false);
         return;
 
-            error:
+    error:
         return;
 }
 
