@@ -11,6 +11,8 @@ option(HIMAX_ENABLE_NEON "Enable ARM NEON intrinsics when available" ON)
 # --- HimaxChipCore (Static Library) ---
 # 定义源文件和头文件路径
 set(HIMAX_CORE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/HimaxChipCore")
+# file(GLOB) is convenient but can miss new files if not re-run.
+# Since we are adding files, it should pick them up on next run.
 file(GLOB HIMAX_CORE_SOURCES "${HIMAX_CORE_ROOT}/source/*.cpp")
 file(GLOB HIMAX_CORE_HEADERS "${HIMAX_CORE_ROOT}/header/*.h")
 file(GLOB HIMAX_CORE_HEADERS_HPP "${HIMAX_CORE_ROOT}/header/*.hpp")
@@ -52,4 +54,3 @@ target_include_directories(EGoTouchService PRIVATE
 
 # 链接静态库
 target_link_libraries(EGoTouchService PRIVATE HimaxChipCore)
-

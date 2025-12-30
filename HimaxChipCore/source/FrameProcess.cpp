@@ -9,6 +9,7 @@
 #include "FrameProcess.h"
 #include <array>
 #include <vector>
+#include <cstdint>
 
 using RawFrame = std::array<uint8_t, 4800>; 
 
@@ -26,6 +27,7 @@ void ProcessFrame(const RawFrame& buffer, std::vector<Point>& touches) {
     const uint8_t* src = buffer.data();
     int total_pixels = 2400; // 40x60
 
+#if HIMAX_HAS_NEON
     // 1. 准备常量
     // 基线 32768 (0x8000)
     const uint16x8_t v_baseline = vdupq_n_u16(32768); 
@@ -76,4 +78,21 @@ void ProcessFrame(const RawFrame& buffer, std::vector<Point>& touches) {
             }
         }
     }
+#else
+    // Scalar fallback for non-NEON platforms (e.g. x86_64 build environment)
+    for (int i = 0; i < total_pixels; ++i) {
+        // Data is Big Endian
+        // buffer is array of uint8_t
+        // Pixel i starts at i*2
+        uint16_t high = src[i * 2];
+        uint16_t low = src[i * 2 + 1];
+        uint16_t val = (high << 8) | low;
+
+        if (val > 33568) {
+            touches.push_back({i, (int16_t)(val - 32768)});
+        } else if (val < 27768) {
+            touches.push_back({i, (int16_t)(val - 32768)});
+        }
+    }
+#endif
 }
