@@ -2,20 +2,17 @@
  * @Author: Detach0-0 detach0-0@outlook.com
  * @Date: 2025-12-01 19:25:55
  * @LastEditors: Detach0-0 detach0-0@outlook.com
- * @LastEditTime: 2025-12-25 00:46:34
+ * @LastEditTime: 2025-12-29 13:13:56
  * @FilePath: \EGoTouchRev-vsc\HimaxChipCore\source\HimaxHal.cpp
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
-#include "HimaxHal.h"
-#include "HimaxChip.h"
+#include "HimaxProtocol.h"
 #include <cstddef>
 #include <cstdint>
 #include <errhandlingapi.h>
-#include <format>
 #include <handleapi.h>
 #include <ioapiset.h>
 #include <minwindef.h>
-#include <string>
 #include <synchapi.h>
 #include <windows.h>
 #include <winscard.h>
@@ -37,22 +34,6 @@ const DWORD SPI_IOCTL_SET_RESET   = 0x4001c34; // 复位设备
 const DWORD SPI_IOCTL_READ_ACPI   = 0x4001c38; // 读取 ACPI 配置
 
 namespace {
-    /**
-     * @brief 将字节数组转换为十六进制字符串
-     * @param data 数据指针
-     * @param len 数据长度
-     * @return std::string 十六进制字符串
-     */
-    std::string BytesToHex(const uint8_t* data, size_t len) {
-        if (!data || len == 0) return "";
-        std::string res;
-        res.reserve(len * 3);
-        for (size_t i = 0; i < len; ++i) {
-            res += std::format("{:02X} ", data[i]);
-        }
-        if (!res.empty()) res.pop_back();
-        return res;
-    }
 
     /**
      * @brief 执行同步 I/O 操作（封装 Overlapped 异步操作为同步）
@@ -274,9 +255,6 @@ namespace Himax {
         
         m_xfer_buffer.resize(total_size, 0);
 
-        std::string packetHex = BytesToHex(m_xfer_buffer.data(), m_xfer_buffer.size());
-        HIMAX_LOG(packetHex);
-        
         uint32_t retLen = 0;
         res = Ioctl(SPI_IOCTL_FULL_DUPLEX, 
                             m_xfer_buffer.data(), m_xfer_buffer.size(), 
@@ -286,9 +264,6 @@ namespace Himax {
         if (res) {
             if (retLen >= total_size) {
                 memcpy(data, m_xfer_buffer.data() + data_offset, len);
-                std::string hexData = BytesToHex(data, len);
-                std::string msg = std::format("ReadBus Data: {}", hexData);
-                HIMAX_LOG(msg);
             }
         }
         
@@ -317,8 +292,6 @@ namespace Himax {
             m_xfer_buffer.insert(m_xfer_buffer.end(), data, data + len);
         }
 
-        std::string packetHex = BytesToHex(m_xfer_buffer.data(), m_xfer_buffer.size());
-        HIMAX_LOG(packetHex);
 
         return PerformSyncIo(m_handle, m_mutex, m_lastError, [&](OVERLAPPED* pov, LPDWORD pBytes){
             return WriteFile(m_handle, m_xfer_buffer.data(), (DWORD)m_xfer_buffer.size(), NULL, pov);
@@ -425,5 +398,207 @@ namespace Himax {
         return m_lastError;
     }
 
+    bool HimaxProtocol::burst_enable(HalDevice *dev, bool isEnable) {
+        if (!dev || !dev->IsValid()) return false;
 
+        uint8_t tmp_data[4]{};
+        tmp_data[0] = 0x31;
+
+        if (!dev->WriteBus(0x13, nullptr, tmp_data, 1)) {
+            dev->GetError();
+            return false;
+        }
+
+        tmp_data[0] = (0x12 | isEnable);
+
+        if (!dev->WriteBus(0x0D, nullptr, tmp_data, 1)) {
+            dev->GetError();
+            return false;
+        }
+        return true;
+    }
+
+    bool HimaxProtocol::register_read(HalDevice *dev, const uint8_t *addr, uint8_t *buffer, uint32_t len) {
+        if (!dev || !dev->IsValid()) return false;
+
+        uint8_t tmp_data[4];
+        int i = 0;
+        int address = 0;
+
+        if (len > 256) {
+            return false;
+        }
+        if (len > 4) {
+            burst_enable(dev, true);
+        } else {
+            burst_enable(dev, false);
+        }
+
+        if (!dev->WriteBus(0x00, addr, nullptr, 0)) {
+            dev->GetError();
+            return false;
+        }
+
+        if (!dev->WriteBus(0x0C, nullptr, 0x00, 1)) {
+            dev->GetError();
+            return false;
+        }
+
+        if (!dev->ReadBus(0x08, buffer, len)) {
+            dev->GetError();
+            return false;
+        }
+        
+        return true;
+    }
+
+    bool HimaxProtocol::register_write(HalDevice *dev, const uint8_t *addr, const uint8_t *data, uint32_t len) {
+        if (!dev || !dev->IsValid()) return false;
+
+        if (len > 4) {
+            burst_enable(dev, 1);
+        } else {
+            burst_enable(dev, 0);
+        }
+        return dev->WriteBus(0x00, addr, data, len);
+    }
+
+    void HimaxProtocol::build_command_packet(uint8_t cmd_id, uint8_t cmd_val, uint8_t *packet) {
+        if (!packet) {
+            return;
+        }
+
+        // 1. 初始化缓冲区为 0 (对应 local_5b = 0, local_50 = 0 等初始化)
+        std::array<uint8_t, 18> tmp_data{};
+
+        // 2. 设置包含“虚拟包头”的初始值，用于计算 CheckSum
+        tmp_data[0] = 0xA8;     // local_60[0]
+        tmp_data[1] = 0x8A;     // local_60[1]
+        tmp_data[2] = cmd_id;  // local_60[2]
+        tmp_data[3] = 0x00;     // local_60[3]
+        tmp_data[4] = cmd_val;  // local_60[4]
+        
+        // 3. 计算 CheckSum (iVar13)
+        // 逻辑：将 16 字节看作 8 个 uint16 (小端序) 进行累加
+        uint32_t checksum_sum = 0;
+        for (int i = 0; i < 16; i += 2) {
+            // 组合低字节和高字节为 16位 整数
+            uint16_t word = static_cast<uint16_t>(tmp_data[i]) |
+                            (static_cast<uint16_t>(tmp_data[i + 1]) << 8);
+            checksum_sum += word;
+        }
+
+        // 4. 计算补码 (Two's Complement)
+        // 逻辑：0x10000 - Sum，并截断为 16 位
+        uint16_t final_checksum = static_cast<uint16_t>((0x10000 - checksum_sum) & 0xFFFF);
+
+        // 5. 填入校验和 (Little Endian)
+        tmp_data[16] = final_checksum & 0xFF;         // Low Byte
+        tmp_data[17] = (final_checksum >> 8) & 0xFF;  // High Byte
+
+        // 6. 关键步骤：发送前清除包头
+        tmp_data[0] = 0x00;
+        tmp_data[1] = 0x00;
+
+        std::memcpy(packet, tmp_data.data(), tmp_data.size());    
+    }
+
+    bool HimaxProtocol::write_and_verify(HalDevice* dev, const uint8_t* addr, const uint8_t* data, uint32_t len, uint32_t verify_len) {
+        if (!dev || !dev->IsValid()) return false;
+
+        std::vector<uint8_t> write_buf(data, data + len);
+        std::vector<uint8_t> read_buf(len, 0);
+
+        if (!register_write(dev, addr, data, len)) {
+            return false;
+        }
+
+        if (!register_read(dev, addr, read_buf.data(), len)) {
+            return false;
+        }
+
+        uint32_t cmp_len = verify_len;
+        if (cmp_len == 0) {
+            cmp_len = (len >= 2) ? 2u : len;
+        }
+        if (cmp_len > len) {
+            cmp_len = len;
+        }
+
+        if (std::equal(write_buf.begin(), write_buf.begin() + cmp_len, read_buf.begin())) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+    * @brief 设置 Safe Mode 接口状态
+    * 
+    * @param dev 设备指针
+    * @param state 目标状态
+    *              - true: 进入 Safe Mode (写入 {0x27, 0x95} 到 0x31)
+    *              - false: 退出 Safe Mode (写入 {0x00, 0x00} 到 0x31)
+    * @return bool 操作是否成功
+    */
+    bool HimaxProtocol::safeModeSetRaw(HalDevice* dev, const bool state) {
+    if (!dev || !dev->IsValid()) return false;
+    uint8_t tmp_data[2]{};
+    const uint8_t adr_i2c_psw_lb = 0x31;
+
+    if (state == 1) {
+        tmp_data[0] = 0x27;
+        tmp_data[1] = 0x95;
+        if (!dev->WriteBus(adr_i2c_psw_lb, nullptr, tmp_data, 2)) return false;
+        if (!dev->ReadBus(adr_i2c_psw_lb, tmp_data, 2)) return false;
+
+        const bool ok = (tmp_data[0] == 0x27 && tmp_data[1] == 0x95);
+        return ok;
+    } else {
+        if (!dev->WriteBus(adr_i2c_psw_lb, nullptr, tmp_data, 2)) return false;
+        if (!dev->ReadBus(adr_i2c_psw_lb, tmp_data, 2)) return false;
+
+        const bool ok = (tmp_data[0] == 0x00 && tmp_data[1] == 0x00);
+        return ok;
+    }
+}
+
+    bool HimaxProtocol::send_command(HalDevice* dev, uint8_t cmd_id, uint8_t cmd_val, uint8_t& current_slot) {
+        if (!dev || !dev->IsValid()) return false;
+
+        constexpr uint32_t BASE_ADDR = 0x10007550;
+        const uint32_t addr = BASE_ADDR + static_cast<uint32_t>(current_slot) * 0x10;
+        
+        uint8_t tmp_addr[4] = {
+            static_cast<uint8_t>(addr & 0xFF),
+            static_cast<uint8_t>((addr >> 8) & 0xFF),
+            static_cast<uint8_t>((addr >> 16) & 0xFF),
+            static_cast<uint8_t>((addr >> 24) & 0xFF)
+        };
+
+        // 构建命令包 (18 字节，但只写入 16 字节数据部分)
+        std::array<uint8_t, 18> packet{};
+        build_command_packet(cmd_id, cmd_val, packet.data());
+
+        // 写入命令包到对应 slot 地址
+        if (!register_write(dev, tmp_addr, packet.data(), 16)) {
+            return false;
+        }
+
+        // 写入触发标记 (0xA8, 0x8A)
+        std::array<uint8_t, 4> trigger = {0xA8, 0x8A, 0x00, 0x00};
+        if (!register_write(dev, tmp_addr, trigger.data(), 4)) {
+            return false;
+        }
+
+        // 读取确认
+        std::array<uint8_t, 16> read_buf{};
+        if (!register_read(dev, tmp_addr, read_buf.data(), 16)) {
+            return false;
+        }
+
+        // 更新 slot (循环使用 0-4)
+        current_slot = (current_slot + 1) % 5;
+        return true;
+    }
 }
