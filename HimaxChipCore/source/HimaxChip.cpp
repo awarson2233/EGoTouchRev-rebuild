@@ -1363,6 +1363,7 @@ void Chip::thp_afe_start(void) {
 
     runing:
         HIMAX_LOG("runing!");
+        isRuning = true;
         while (isRuning) {
             m_status = THP_AFE_STATUS::RUNNING;
 
@@ -1372,9 +1373,9 @@ void Chip::thp_afe_start(void) {
             
             HIMAX_LOG(std::format(
             "tmp_buffer2[{}..{}] = {}",
-            100,
-            200,
-            FormatHexRange(tmp_buffer2.data(), tmp_buffer2.size(), 100, 200)));
+            0,
+            tmp_buffer2.size() - 1,
+            FormatHexRange(tmp_buffer2.data(), tmp_buffer2.size(), 0, 5062)));
         }
         continue;
     stop:
