@@ -418,12 +418,39 @@ namespace Himax {
         return true;
     }
 
-    bool HimaxProtocol::register_read(HalDevice *dev, const uint8_t *addr, uint8_t *buffer, uint32_t len) {
+    /**
+    * @brief 将地址值按指定长度解析为小端序字节数组
+    * @param addr 地址值
+    * @param cmd 目标缓冲区
+    * @param len 目标长度 (1, 2, 或 4)
+    */
+    void himax_parse_assign_cmd(uint32_t addr, uint8_t *cmd, int len) {
+        switch (len) {
+        case 1:
+            cmd[0] = static_cast<uint8_t>(addr & 0xFF);
+            break;
+        case 2:
+            cmd[0] = static_cast<uint8_t>(addr & 0xFF);
+            cmd[1] = static_cast<uint8_t>((addr >> 8) & 0xFF);
+            break;
+        case 4:
+            cmd[0] = static_cast<uint8_t>(addr & 0xFF);
+            cmd[1] = static_cast<uint8_t>((addr >> 8) & 0xFF);
+            cmd[2] = static_cast<uint8_t>((addr >> 16) & 0xFF);
+            cmd[3] = static_cast<uint8_t>((addr >> 24) & 0xFF);
+            break;
+        default:
+            break;
+        }
+    }
+
+    bool HimaxProtocol::register_read(HalDevice *dev, const uint32_t addr, uint8_t *buffer, uint32_t len) {
         if (!dev || !dev->IsValid()) return false;
 
         uint8_t tmp_data[4];
         int i = 0;
         int address = 0;
+        himax_parse_assign_cmd(addr, tmp_data, 4);
 
         if (len > 256) {
             return false;
@@ -434,7 +461,7 @@ namespace Himax {
             burst_enable(dev, false);
         }
 
-        if (!dev->WriteBus(0x00, addr, nullptr, 0)) {
+        if (!dev->WriteBus(0x00, tmp_data, nullptr, 0)) {
             dev->GetError();
             return false;
         }
@@ -452,15 +479,17 @@ namespace Himax {
         return true;
     }
 
-    bool HimaxProtocol::register_write(HalDevice *dev, const uint8_t *addr, const uint8_t *data, uint32_t len) {
+    bool HimaxProtocol::register_write(HalDevice *dev, const uint32_t addr, const uint8_t *data, uint32_t len) {
         if (!dev || !dev->IsValid()) return false;
+        uint8_t tmp_data[4];
+        himax_parse_assign_cmd(addr, tmp_data, 4);
 
         if (len > 4) {
             burst_enable(dev, 1);
         } else {
             burst_enable(dev, 0);
         }
-        return dev->WriteBus(0x00, addr, data, len);
+        return dev->WriteBus(0x00, tmp_data, data, len);
     }
 
     void HimaxProtocol::build_command_packet(uint8_t cmd_id, uint8_t cmd_val, uint8_t *packet) {
@@ -503,7 +532,7 @@ namespace Himax {
         std::memcpy(packet, tmp_data.data(), tmp_data.size());    
     }
 
-    bool HimaxProtocol::write_and_verify(HalDevice* dev, const uint8_t* addr, const uint8_t* data, uint32_t len, uint32_t verify_len) {
+    bool HimaxProtocol::write_and_verify(HalDevice* dev, const uint32_t addr, const uint8_t* data, uint32_t len, uint32_t verify_len) {
         if (!dev || !dev->IsValid()) return false;
 
         std::vector<uint8_t> write_buf(data, data + len);
@@ -569,31 +598,25 @@ namespace Himax {
         constexpr uint32_t BASE_ADDR = 0x10007550;
         const uint32_t addr = BASE_ADDR + static_cast<uint32_t>(current_slot) * 0x10;
         
-        uint8_t tmp_addr[4] = {
-            static_cast<uint8_t>(addr & 0xFF),
-            static_cast<uint8_t>((addr >> 8) & 0xFF),
-            static_cast<uint8_t>((addr >> 16) & 0xFF),
-            static_cast<uint8_t>((addr >> 24) & 0xFF)
-        };
 
         // 构建命令包 (18 字节，但只写入 16 字节数据部分)
         std::array<uint8_t, 18> packet{};
         build_command_packet(cmd_id, cmd_val, packet.data());
 
         // 写入命令包到对应 slot 地址
-        if (!register_write(dev, tmp_addr, packet.data(), 16)) {
+        if (!register_write(dev, addr, packet.data(), 16)) {
             return false;
         }
 
         // 写入触发标记 (0xA8, 0x8A)
         std::array<uint8_t, 4> trigger = {0xA8, 0x8A, 0x00, 0x00};
-        if (!register_write(dev, tmp_addr, trigger.data(), 4)) {
+        if (!register_write(dev, addr, trigger.data(), 4)) {
             return false;
         }
 
         // 读取确认
         std::array<uint8_t, 16> read_buf{};
-        if (!register_read(dev, tmp_addr, read_buf.data(), 16)) {
+        if (!register_read(dev, addr, read_buf.data(), 16)) {
             return false;
         }
 

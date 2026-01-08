@@ -58,11 +58,11 @@ namespace Himax {
     namespace HimaxProtocol {
 
         bool burst_enable(HalDevice *dev, bool isEnable);
-        bool register_read(HalDevice *dev, const uint8_t* addr, uint8_t* buffer, uint32_t len);
-        bool register_write(HalDevice *dev, const uint8_t* addr, const uint8_t* buffer, uint32_t len);
+        bool register_read(HalDevice *dev, const uint32_t addr, uint8_t* buffer, uint32_t len);
+        bool register_write(HalDevice *dev, const uint32_t addr, const uint8_t* buffer, uint32_t len);
 
         void build_command_packet(uint8_t cmd_id, uint8_t cmd_val, uint8_t* packet);
-        bool write_and_verify(HalDevice* dev, const uint8_t* addr, const uint8_t* data, uint32_t len, uint32_t verify_len = 0);
+        bool write_and_verify(HalDevice* dev, const uint32_t addr, const uint8_t* data, uint32_t len, uint32_t verify_len = 0);
         bool safeModeSetRaw(HalDevice* dev, const bool state);
         
         /**

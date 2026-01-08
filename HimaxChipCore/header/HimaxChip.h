@@ -1,3 +1,11 @@
+/*
+ * @Author: Detach0-0 detach0-0@outlook.com
+ * @Date: 2026-01-03 01:19:27
+ * @LastEditors: Detach0-0 detach0-0@outlook.com
+ * @LastEditTime: 2026-01-07 13:30:34
+ * @FilePath: \EGoTouchRev-vsc\HimaxChipCore\header\HimaxChip.h
+ * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+ */
 #pragma once
 #include "HimaxProtocol.h"
 #include "HimaxRegisters.h"
@@ -16,6 +24,7 @@ namespace Himax {
         HX_RAWDATA = 0,
         HX_ACT_IDLE_RAWDATA = 1,
         HX_LP_IDLE_RAWDATA = 2,
+        HX_BACK_NORMAL = 3,
     };
 
     enum class THP_AFE_MODE {
@@ -67,7 +76,7 @@ namespace Himax {
             
             bool hx_sense_on(bool isHwReset);
             bool hx_sense_off(bool check_en);
-            
+            bool himax_mcu_assign_sorting_mode(uint8_t* tmp_data);
             // 统一的 AFE 模式切换接口
             bool switch_afe_mode(AFE_Command cmd, uint8_t param = 0);
         public:
