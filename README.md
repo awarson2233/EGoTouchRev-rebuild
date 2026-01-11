@@ -1,7 +1,7 @@
 EGoTouch-Rev
 ======================
 
-**EGoTouch-Rev** 是针对 **Matebook E Go (Windows on Arm64)** 设备触摸屏驱动服务的高性能重构项目。
+**EGoTouch-Rev** 是针对 **Matebook E Go (Windows on Arm64)** 设备触摸屏驱动服务的高性能重构项目。群号：1080097461
 
 ## ⚠️ 维护状态声明
 
