@@ -12,7 +12,7 @@ public:
     uint8_t adr_i2c_psw_ub;						// 0x32 - I2C password upper byte
     uint8_t data_ahb_access_direction_read;		// 0x00 - AHB read access direction
     uint8_t data_conti;							// 0x31 - Continuous mode data
-    uint8_t data_incr4;							// 0x10 - Increment 4 data
+    uint8_t data_incr4;							// 0x12 - Increment 4 data
     uint8_t data_i2c_psw_lb;					// 0x27 - I2C password lower byte data
     uint8_t data_i2c_psw_ub;					// 0x95 - I2C password upper byte data
     uint32_t addr_tcon_on_rst;					// 0x80020020 - TCON on reset address

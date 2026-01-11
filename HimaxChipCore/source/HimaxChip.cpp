@@ -1,4 +1,13 @@
+/*
+ * @Author: Detach0-0 detach0-0@outlook.com
+ * @Date: 2025-12-05 11:45:27
+ * @LastEditors: Detach0-0 detach0-0@outlook.com
+ * @LastEditTime: 2026-01-09 16:37:22
+ * @FilePath: \EGoTouchRev-vsc\HimaxChipCore\source\HimaxChip.cpp
+ * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+ */
 #include "HimaxChip.h"
+#include "HimaxProtocol.h"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -42,12 +51,12 @@ void himax_parse_assign_cmd(uint32_t addr, uint8_t *cmd, int len) {
 namespace Himax {
 
 Chip::Chip(const std::wstring& master_path, const std::wstring& slave_path, const std::wstring& interrupt_path)
-    : m_ic_op(InitIcOperation()),
-      m_fw_op(InitFwOperation()),
-      m_flash_op(InitFlashOperation()),
-      m_sram_op(InitSramOperation()),
-      m_driver_op(InitDriverOperation()),
-      m_zf_op(InitZfOperation())
+    : pic_op(InitIcOperation()),
+      pfw_op(InitFwOperation()),
+      pflash_op(InitFlashOperation()),
+      psram_op(InitSramOperation()),
+      pdriver_op(InitDriverOperation()),
+      pzf_op(InitZfOperation())
 {
     m_master = std::make_unique<HalDevice>(master_path.c_str(), DeviceType::Master);
     m_slave = std::make_unique<HalDevice>(slave_path.c_str(), DeviceType::Slave);
@@ -141,7 +150,7 @@ bool Chip::init_buffers_and_register(void) {
 bool Chip::himax_mcu_assign_sorting_mode(uint8_t* tmp_data) {
     bool step_ok = false;
     for (int i = 0; i < 10; ++i) {
-        if (HimaxProtocol::write_and_verify(m_master.get(), m_fw_op.addr_sorting_mode_en, tmp_data, 4)) {
+        if (HimaxProtocol::write_and_verify(m_master.get(), pfw_op.addr_sorting_mode_en, tmp_data, 4)) {
             step_ok = true;
             break;
         }
@@ -153,68 +162,59 @@ bool Chip::himax_mcu_assign_sorting_mode(uint8_t* tmp_data) {
     return true;
 }
 
-bool Chip::hx_set_raw_data_type(DeviceType device, THP_INSPECTION_ENUM mode) {
+bool Chip::himax_switch_data_type(DeviceType device, THP_INSPECTION_ENUM mode) {
+    std::array<uint8_t, 4> tmp_data{};
+    std::string message;
     HalDevice* dev = SelectDevice(device);
-    if (!dev) return false;
-    std::string tmp_string;
-    std::vector<uint8_t> tmp_data(4, 0);
-    
+    uint8_t cnt = 50;
+
+    if (!dev) {
+        HIMAX_LOG("get device failed");
+        return false;
+    } else {
+        HIMAX_LOG("Enter!");
+    }
+
     switch (mode) {
     case THP_INSPECTION_ENUM::HX_RAWDATA:
         tmp_data[0] = 0xF6;
-        tmp_string = "HX_RAWDATA";
+        message = "HX_RAWDATA";    
         break;
+    
     case THP_INSPECTION_ENUM::HX_ACT_IDLE_RAWDATA:
         tmp_data[0] = 0x0A;
-        tmp_string = "HX_ACT_IDLE_RAWDATA";
+        message = "HX_ACT_IDLE_RAWDATA";
         break;
-    case Himax::THP_INSPECTION_ENUM::HX_LP_IDLE_RAWDATA:
+    
+    case THP_INSPECTION_ENUM::HX_LP_IDLE_RAWDATA:
         tmp_data[0] = 0x0A;
-        tmp_string = "HX_LP_IDLE_RAWDATA";
+        message = "HX_LP_IDLE_RAWDATA";
         break;
-
+    
     case THP_INSPECTION_ENUM::HX_BACK_NORMAL:
         tmp_data[0] = 0x00;
-        tmp_string = "HX_BACK_NORMAL";
+        message = "HX_BACK_NORMAL";
         break;
 
     default:
-        tmp_data[0] = 0xF6;
-        tmp_string = "HX_RAWDATA";
+        tmp_data[0] = 0x00;
+        message = "HX_BACK_NORMAL_UNKNOW";
         break;
     }
+    HIMAX_LOG(std::format("switch to {:s}!", message));
 
     bool step_ok = false;
-    for (int i = 0; i < 10; ++i) {
-        if (HimaxProtocol::write_and_verify(dev, m_fw_op.addr_raw_out_sel, tmp_data.data(), 4, 1)) {
-            step_ok = true;
-            break;
-        }
+    do {
+        step_ok = HimaxProtocol::write_and_verify(dev, pfw_op.addr_raw_out_sel, tmp_data.data(), 4);
+    }while (!step_ok && cnt > 0);
+
+    if (step_ok) {
+        HIMAX_LOG(std::format("switch to {:s} success!", message));
+    } else {
+        HIMAX_LOG(std::format("switch failed!"));
     }
 
-    if (!step_ok) {
-        HIMAX_LOG(std::format("SetRawDataType: Failed to set mode 0x{:02X} to 0x100072EC", tmp_data[0]));
-        return false;
-    }
-
-    step_ok = false;
-    for (int i = 0; i < 10; ++i) {
-        // 修正：passwrd 长度为 2 字节
-        uint8_t tmp_data2[4];
-        himax_parse_assign_cmd(m_sram_op.passwrd, tmp_data2, 4);
-        if (HimaxProtocol::register_write(dev, m_sram_op.addr_rawdata_addr, tmp_data2, 4)) {
-            step_ok = true;
-            break;
-        }
-        Sleep(1);
-    }
-
-    if (!step_ok) {
-        HIMAX_LOG("Failed to write SRAM password (0x5AA5)");
-    }
-
-    HIMAX_LOG(std::format("set raw data out select: {:s}", tmp_string));
-    return true;
+    return step_ok;
 }
 
 /**
@@ -230,8 +230,8 @@ bool Chip::hx_hw_reset_ahb_intf(DeviceType type) {
     bool res = true;
     HIMAX_LOG("Enter!");
 
-    himax_parse_assign_cmd(m_fw_op.data_clear, tmp_data, 4);
-    bool step_ok = HimaxProtocol::register_write(dev, m_driver_op.addr_fw_define_2nd_flash_reload, tmp_data, 4);
+    himax_parse_assign_cmd(pfw_op.data_clear, tmp_data, 4);
+    bool step_ok = HimaxProtocol::register_write(dev, pdriver_op.addr_fw_define_2nd_flash_reload, tmp_data, 4);
     HIMAX_LOG(std::format("clear reload done {}", step_ok ? "succed" : "failed"));
     res = res && step_ok;
 
@@ -283,16 +283,16 @@ bool Chip::hx_sw_reset_ahb_intf(DeviceType type) {
 
     Sleep(10);
     // 清空addr_fw_define_2nd_flash_reload，不尝试，失败输出clean reload done failed!，立即返回
-    himax_parse_assign_cmd(m_driver_op.data_fw_define_flash_reload_en, tmp_data, 4);
-    if (!HimaxProtocol::register_write(dev, m_driver_op.addr_fw_define_2nd_flash_reload, tmp_data, 4)) {
+    himax_parse_assign_cmd(pdriver_op.data_fw_define_flash_reload_en, tmp_data, 4);
+    if (!HimaxProtocol::register_write(dev, pdriver_op.addr_fw_define_2nd_flash_reload, tmp_data, 4)) {
         HIMAX_LOG("clean reload done failed!");
         return false;
     }
     Sleep(10);
     
     // addr_system_reset，不尝试，失败直接返回"Failed to write System Reset command"
-    himax_parse_assign_cmd(m_fw_op.data_system_reset, tmp_data, 4);
-    if (!HimaxProtocol::register_write(dev, m_fw_op.addr_system_reset, tmp_data, 4)) {
+    himax_parse_assign_cmd(pfw_op.data_system_reset, tmp_data, 4);
+    if (!HimaxProtocol::register_write(dev, pfw_op.addr_system_reset, tmp_data, 4)) {
         HIMAX_LOG("Failed to write System Reset command");
         return false;
     }
@@ -306,30 +306,25 @@ bool Chip::hx_sw_reset_ahb_intf(DeviceType type) {
 
 /**
  * @brief 设置 Flash 重载状态
- * @param state 状态 (0 为禁用, 非 0 为启用)
+ * @param disable 状态 (0 为禁用, 非 0 为启用)
  * @return bool 是否成功
  */
-bool Chip::hx_reload_set(uint8_t state) {
+bool Chip::himax_mcu_reload_disable(uint8_t disable) {
     std::string message;
     bool res = false;
-    const bool enable = (state != 0);
-    uint8_t tmp_data[4] = {0x5A, 0xA5, 0x00, 0x00};
-    if (!enable) {
-        tmp_data[0] = 0x00;
-        tmp_data[1] = 0x00;
+    HIMAX_LOG("entering!");
+    std::array<uint8_t, 4> tmp_data{};
+
+    if (disable) {
+        himax_parse_assign_cmd(pdriver_op.data_fw_define_flash_reload_dis, tmp_data.data(), 4);
+        HimaxProtocol::register_write(m_master.get(), pdriver_op.addr_fw_define_flash_reload, tmp_data.data(), 4);
+    } else {
+        himax_parse_assign_cmd(pdriver_op.data_fw_define_flash_reload_en, tmp_data.data(), 4);
+        HimaxProtocol::register_write(m_master.get(), pdriver_op.addr_fw_define_flash_reload, tmp_data.data(), 4);
     }
 
-    message = std::format("set reload {}", enable ? "enable" : "disable");
-    HIMAX_LOG(message);
-
-    for (int attempt = 0; attempt < 9; ++attempt) {
-        res = HimaxProtocol::write_and_verify(m_master.get(), m_driver_op.addr_fw_define_flash_reload, tmp_data, 4);
-        if (res) break;
-    }
-
-    message = std::format("set reload {}", res ? "succeed" : "failed");
-    HIMAX_LOG(message);
-    return res;
+    HIMAX_LOG("setting OK!");
+    return true;
 }
 
 /**
@@ -354,10 +349,10 @@ bool Chip::hx_set_N_frame(uint8_t nFrame) {
     };
 
     pack32(target1);
-    if (!HimaxProtocol::write_and_verify(m_master.get(), m_fw_op.addr_set_frame_addr, tmp_data.data(), 4)) return false;
+    if (!HimaxProtocol::write_and_verify(m_master.get(), pfw_op.addr_set_frame_addr, tmp_data.data(), 4)) return false;
 
     pack32(target2);
-    if (!HimaxProtocol::write_and_verify(m_master.get(), m_fw_op.addr_set_frame_addr, tmp_data.data(), 4)) return false;
+    if (!HimaxProtocol::write_and_verify(m_master.get(), pfw_op.addr_set_frame_addr, tmp_data.data(), 4)) return false;
     HIMAX_LOG("Out!");
     return true;
 }
@@ -368,10 +363,12 @@ bool Chip::himax_switch_mode_inspection(THP_INSPECTION_ENUM mode) {
     constexpr int kWriteAttempts = 20;
     std::array<uint8_t, 4> tmp_data{};
     bool clear = false;
+    HIMAX_LOG("Entering!");
 
-    himax_parse_assign_cmd(m_sram_op.addr_rawdata_end, tmp_data.data(), 4);
+    /*Stop Handshakng*/
+    himax_parse_assign_cmd(psram_op.addr_rawdata_end, tmp_data.data(), 4);
     for (size_t i = 0; i < 20; i++) {
-        clear = HimaxProtocol::write_and_verify(m_master.get(), m_sram_op.addr_rawdata_addr, tmp_data.data(), 4, 2);
+        clear = HimaxProtocol::write_and_verify(m_master.get(), psram_op.addr_rawdata_addr, tmp_data.data(), 4, 2);
         if (clear) {
             break;
         }
@@ -382,50 +379,38 @@ bool Chip::himax_switch_mode_inspection(THP_INSPECTION_ENUM mode) {
         return false;
     }
 
+    /*Switch Mode*/
     tmp_data.fill(0);
     switch (mode) {
     case THP_INSPECTION_ENUM::HX_RAWDATA: // normal
         tmp_data[0] = 0x00;
         tmp_data[1] = 0x00;
+        message = std::format("HX_RAWDATA");
         break;
     case THP_INSPECTION_ENUM::HX_ACT_IDLE_RAWDATA: // open
         tmp_data[0] = 0x22;
         tmp_data[1] = 0x22;
+        message = std::format("HX_ACT_IDLE_RAWDATA");
         break;
     case THP_INSPECTION_ENUM::HX_LP_IDLE_RAWDATA: // short
         tmp_data[0] = 0x50;
         tmp_data[1] = 0x50;
+        message = std::format("HX_LP_IDLE_RAWDATA");
         break;
-    default:
-        message = std::format("undefined mode, fallback to normal");
-        HIMAX_LOG(message);
+    case THP_INSPECTION_ENUM::HX_BACK_NORMAL:
         tmp_data[0] = 0x00;
         tmp_data[0] = 0x00;
+        message = std::format("HX_BACK_NORMAL");
         break;
     }
 
-    const uint32_t password =
-        static_cast<uint32_t>(tmp_data[0]) |
-        (static_cast<uint32_t>(tmp_data[1]) << 8) |
-        (static_cast<uint32_t>(tmp_data[2]) << 16) |
-        (static_cast<uint32_t>(tmp_data[3]) << 24);
-
-    bool wrote = false;
-    for (int attempt = 0; attempt < kWriteAttempts; ++attempt) {
-        if (HimaxProtocol::write_and_verify(m_master.get(), m_fw_op.addr_sorting_mode_en, tmp_data.data(), 4)) {
-            wrote = true;
-            break;
-        }
-        Sleep(10);
-    }
-
-    if (wrote) {
-        message = std::format("switch mode password(0x{:08X}) written!", password);
+    bool res = himax_mcu_assign_sorting_mode(tmp_data.data());
+    if (res) {
+        HIMAX_LOG(std::format("Switching to {}", message));
     } else {
-        message = std::format("switch mode write failed after {} attempts, password(0x{:08X})", kWriteAttempts, password);
+        HIMAX_LOG(std::format("Failed to switch to {}", message));
     }
-    HIMAX_LOG(message);
-    return wrote;
+    return res;
 }
 
 /**
@@ -434,7 +419,7 @@ bool Chip::himax_switch_mode_inspection(THP_INSPECTION_ENUM mode) {
  */
 bool Chip::hx_is_reload_done_ahb(void) {
     std::vector<uint8_t> tmp_data(4, 0);
-    bool step = HimaxProtocol::register_read(m_master.get(), m_driver_op.addr_fw_define_2nd_flash_reload, tmp_data.data(), 4);
+    bool step = HimaxProtocol::register_read(m_master.get(), pdriver_op.addr_fw_define_2nd_flash_reload, tmp_data.data(), 4);
     if (step && tmp_data[0] == 0xC0 && tmp_data[1] == 0x72) {
         return true;
     } else {
@@ -442,97 +427,94 @@ bool Chip::hx_is_reload_done_ahb(void) {
     }
 }
 
-/**
- * @brief 开启感应模式
- * @param isHwReset 是否执行硬件复位
- * @return bool 是否成功
- */
-bool Chip::hx_sense_on(bool isHwReset) {
+bool Chip::himax_mcu_read_FW_status(void) {
+    std::array<uint8_t, 4> tmp_data{};
+    uint32_t dbg_reg_ary[4] = {pfw_op.addr_fw_dbg_msg_addr, pfw_op.addr_chk_fw_status,
+	0x900000e8/*addr_chk_dd_status*/, pfw_op.addr_flag_reset_event};
+
+    for (uint32_t addr : dbg_reg_ary) {
+        HimaxProtocol::register_read(m_master.get(), addr, tmp_data.data(), 4);
+        HIMAX_LOG(std::format("{:x} = {::#x}",addr, tmp_data));
+    }
+    return true;
+}
+
+void Chip::himax_mcu_interface_on(void) {
     std::string message;
-    message = std::format("hx_sense_on: isHwReset = {}", isHwReset);
+    message = std::format("Enter!");
     HIMAX_LOG(message);
 
-    // 1. 尝试进入 Safe Mode (Sense Off)
-    if (!HimaxProtocol::safeModeSetRaw(m_master.get(), true)) {
-        message = "safeModeSetRaw(true) failed";
+    std::array<uint8_t, 4> tmp_data{};
+    std::array<uint8_t, 4> tmp_data2{};
+    int cnt = 0;
+    bool ret = false;
+    
+    ret = m_master->ReadBus(pic_op.addr_ahb_rdata_byte_0, tmp_data.data(), 4);
+    if (!ret) {
+        message = "ReadBus failed";
         HIMAX_LOG(message);
-        // 如果失败，尝试硬件复位救活
-        if (isHwReset) {
-            hx_hw_reset_ahb_intf(DeviceType::Master);
-        }
-        return false;
-    }
-
-    // 2. 配置参数
-    std::vector<uint8_t> tmp_data(4, 0);
-    bool step_ok = hx_set_N_frame(1);
-    if (!step_ok) {
-        message = std::format("hx_set_N_frame(1) failed!");
-    }
-
-    step_ok = hx_reload_set(0);
-    if (!step_ok) {
-        message = std::format("hx_reload_set (false) failed");
-    }
-    step_ok = himax_switch_mode_inspection(m_inspection_mode);
-
-    // 3. 执行复位，并读取addr_sts_chk，尝试5次
-    uint8_t attempt = 0;
+        return;
+    }        
+    
     do {
-        if (isHwReset) {
-            hx_hw_reset_ahb_intf(DeviceType::Master);
-        } else {
-            // 0x90000018 = 0x55 (Software Reset)
-            hx_sw_reset_ahb_intf(DeviceType::Master);
-        }
-        //
-        step_ok = HimaxProtocol::register_read(m_master.get(), m_zf_op.addr_sts_chk, tmp_data.data(), 4);
-        if (step_ok) {
-            if (tmp_data[0] == 0x05) {
-                message = std::format("sts_chk check success1");
-                HIMAX_LOG(message);
-                break;
-            } else {
-                message = std::format("sts_chk: 0x{:02X}", tmp_data[0]);
-                HIMAX_LOG(message);
-            }
-        } else {
-            step_ok = false;
-            attempt++;
-        }
-    } while (attempt < 5);
-
-    if (step_ok) {
-        for (int retry = 0; retry < 50; retry++) {
-            if (hx_is_reload_done_ahb()) {
-                step_ok = true;
-                break;
-            }
-            Sleep(1);
-        }
-
-        if (step_ok) {
-            hx_set_raw_data_type(DeviceType::Master, m_inspection_mode);
-            hx_set_raw_data_type(DeviceType::Slave, m_inspection_mode);
-            Sleep(0x14);
-            HIMAX_LOG("OUT!");
-            return true;
-        }
-        //这里的else逻辑还有待确认
-    } else {
-        tmp_data.clear();
-        tmp_data.resize(4, 0);
-        step_ok = HimaxProtocol::register_read(m_master.get(), m_fw_op.addr_reload_status, tmp_data.data(), 4);
-        if (step_ok) {
-            message = std::format("reload status 0x{:8x} = 0x{:X}", 0x80050000, tmp_data[0]);
+        tmp_data[0] = pic_op.data_conti;
+        
+        ret = m_master->WriteBus(pic_op.addr_conti, NULL, tmp_data.data(), 1);
+        if (!ret) {
+            message = "bus access fail!";
             HIMAX_LOG(message);
+            return;
         }
-        HIMAX_LOG("OUT!");
-        return false;
-    }
+        
+        tmp_data[0] = pic_op.data_incr4;
+        ret = m_master->WriteBus(pic_op.addr_incr4, NULL, tmp_data.data(), 1);
+        if (!ret) {
+            message = "bus access fail!";
+            HIMAX_LOG(message);
+            return;
+        }
 
-    HIMAX_LOG("hx_sense_on timeout");
-    return false; // 启动超时
+        m_master->ReadBus(pic_op.addr_conti, tmp_data.data(), 1);
+        m_master->ReadBus(pic_op.addr_incr4, tmp_data2.data(), 1);
+
+        if (tmp_data[0] == pic_op.data_conti && tmp_data2[0] == pic_op.data_incr4) {
+            break;
+        }
+
+        Sleep(1);
+    } while (++cnt < 10);
+
+    if (cnt > 0) {
+        message = std::format("Polling burst mode: {:d} times", cnt);
+        HIMAX_LOG(message);
+    }    
+}
+
+/**
+ * @brief 开启感应模式
+ * @param FlashMode 是否执行硬件复位
+ * @return bool 是否成功
+ */
+bool Chip::hx_sense_on(bool FlashMode) {
+    std::string message;
+    message = std::format("Enter, isHwReset = {}", FlashMode);
+    HIMAX_LOG(message);
+    std::array<uint8_t, 4> tmp_data{};
+
+    himax_mcu_interface_on();
+    himax_parse_assign_cmd(pfw_op.data_clear, tmp_data.data(), 4);
+    HimaxProtocol::register_write(m_master.get(), pfw_op.addr_ctrl_fw_isr, tmp_data.data(), 4);
+    
+    Sleep(11);
+
+    if (!FlashMode) {
+        m_master->SetReset(false);
+        m_master->SetReset(true);
+    } else {
+        tmp_data.fill(0);
+        m_master->WriteBus(pic_op.adr_i2c_psw_lb, NULL, tmp_data.data(), 2);
+    }
+    return true;
 }
 
 /**
@@ -550,19 +532,19 @@ bool Chip::hx_sense_off(bool check_en) {
     
     do {
         if (cnt == 0 || (back_data[0] != 0xA5 && back_data[0] != 0x00 && back_data[0] != 0x87)) {
-            himax_parse_assign_cmd(m_fw_op.addr_ctrl_fw_isr, send_data.data(), 4);
-            step_ok = HimaxProtocol::register_write(m_master.get(), m_fw_op.addr_ctrl_fw_isr, send_data.data(), 4);
+            himax_parse_assign_cmd(pfw_op.data_fw_stop, send_data.data(), 4);
+            step_ok = HimaxProtocol::register_write(m_master.get(), pfw_op.addr_ctrl_fw_isr, send_data.data(), 4);
         }
         Sleep(20);
 
-        step_ok = HimaxProtocol::register_read(m_master.get(), m_fw_op.addr_chk_fw_status, back_data.data(), 4);
+        step_ok = HimaxProtocol::register_read(m_master.get(), pfw_op.addr_chk_fw_status, back_data.data(), 4);
         if ((back_data[0] != 0x05) || (check_en == false)) { 
             message = std::format("Do not need wait FW, status = 0x{:X}", back_data[0]);
             HIMAX_LOG(message);
             break;
         }
 
-        HimaxProtocol::register_read(m_master.get(), m_fw_op.addr_ctrl_fw_isr, send_data.data(), 4);
+        HimaxProtocol::register_read(m_master.get(), pfw_op.addr_ctrl_fw_isr, back_data.data(), 4);
 
     }while (send_data[0] != 0x87 && (++cnt < 20) && check_en);
 
@@ -571,18 +553,18 @@ bool Chip::hx_sense_off(bool check_en) {
     back_data.fill(0);
     do {
         for (int i = 0; i < 5; i++) {
-            step_ok = HimaxProtocol::safeModeSetRaw(m_master.get(), false);
+            step_ok = HimaxProtocol::safeModeSetRaw(m_master.get(), true);
             if (step_ok) break;
         }
 
-        step_ok = HimaxProtocol::register_read(m_master.get(), m_fw_op.addr_chk_fw_status, back_data.data(), 4);
+        step_ok = HimaxProtocol::register_read(m_master.get(), pfw_op.addr_chk_fw_status, back_data.data(), 4);
         message = std::format("Check enter_safe_mode data[0]={:x}", back_data[0]);
         HIMAX_LOG(message);
 
         if (back_data[0] == 0x0C) {
             //reset TCON
-            himax_parse_assign_cmd(m_ic_op.addr_tcon_on_rst, send_data.data(), 4);
-            step_ok = HimaxProtocol::register_write(m_master.get(), m_ic_op.addr_tcon_on_rst, send_data.data(), 4);
+            himax_parse_assign_cmd(pic_op.addr_tcon_on_rst, send_data.data(), 4);
+            step_ok = HimaxProtocol::register_write(m_master.get(), pic_op.addr_tcon_on_rst, send_data.data(), 4);
             
             //原厂驱动没有 reset ADC，保留
             /* 
@@ -602,6 +584,36 @@ bool Chip::hx_sense_off(bool check_en) {
     message = std::format("Out!");
     HIMAX_LOG(message);
     return step_ok;
+}
+
+bool Chip::himax_mcu_power_on_init(void) {
+    HIMAX_LOG("entering!");
+    std::array<uint8_t, 4> tmp_data{0x01, 0x00, 0x00, 0x00};
+    std::array<uint8_t, 4> tmp_data2{};
+    uint8_t retry = 0;
+
+    HimaxProtocol::register_write(m_master.get(), pfw_op.addr_raw_out_sel, tmp_data2.data(), 4);
+    HimaxProtocol::register_write(m_master.get(), pfw_op.addr_sorting_mode_en, tmp_data2.data(), 4);
+    HimaxProtocol::register_write(m_master.get(), pfw_op.addr_set_frame_addr, tmp_data.data(), 4);
+    HimaxProtocol::register_write(m_master.get(), pdriver_op.addr_fw_define_2nd_flash_reload, tmp_data2.data(), 4);
+
+    hx_sense_on(false);
+
+    HIMAX_LOG("waiting for FW reload data");
+
+    while (retry++ < 30) {
+        HimaxProtocol::register_read(m_master.get(), pdriver_op.addr_fw_define_2nd_flash_reload, tmp_data.data(), 4);
+        if ((tmp_data[3] == 0x00 && tmp_data[2] == 0x00 &&
+			tmp_data[1] == 0x72 && tmp_data[0] == 0xC0)) {
+            HIMAX_LOG("FW reload done!");
+            break;
+        }
+        HIMAX_LOG(std::format("wait FW reload {:d} times", retry));
+        himax_mcu_read_FW_status();
+        Sleep(11);
+    }
+
+    return true;
 }
 
 /**
@@ -642,63 +654,43 @@ bool Chip::switch_afe_mode(AFE_Command cmd, uint8_t param) {
 bool Chip::thp_afe_start(void) {
     bool step_ok = false;
     uint8_t cnt = 0;
+    std::array<uint8_t, 5063> back_data{};
+    m_master->SetReset(0);
+    m_master->SetReset(1);
 
     hx_hw_reset_ahb_intf(DeviceType::Slave);
     hx_hw_reset_ahb_intf(DeviceType::Master);
+    hx_sense_off(true);
 
+    init_buffers_and_register();
     m_master->SetReset(1);
     Sleep(0x19);
 
-    if (!check_bus()) {
-        return false;
-        //exit
-    }
-    HimaxProtocol::burst_enable(m_master.get(), 1);
+    std::array<uint8_t, 4> tmp_data = {0xA5, 0x5A, 0x00, 0x00};
 
-    HIMAX_LOG("init");
-    init_buffers_and_register();
-    hx_sense_on(true);
+    hx_set_N_frame(1);
+    himax_mcu_reload_disable(false);
+    himax_switch_mode_inspection(THP_INSPECTION_ENUM::HX_RAWDATA);
+    hx_hw_reset_ahb_intf(DeviceType::Master);
+
+    Sleep(400);
+    HimaxProtocol::register_read(m_master.get(), pzf_op.addr_sts_chk, back_data.data(), 4);
+
+    Sleep(400);
+    hx_is_reload_done_ahb();
+    
+    himax_switch_data_type(DeviceType::Master, THP_INSPECTION_ENUM::HX_RAWDATA);
+    HimaxProtocol::register_write(m_master.get(), psram_op.addr_rawdata_addr, tmp_data.data(), 4);
+    himax_switch_data_type(DeviceType::Slave, THP_INSPECTION_ENUM::HX_RAWDATA);
+    HimaxProtocol::register_write(m_slave.get(), psram_op.addr_rawdata_addr, tmp_data.data(), 4);
+    
+    uint8_t tmp_data2[4] = {0x00, 0x00, 0x00, 0x00};
+
+
     m_master->IntOpen();
     m_slave->IntOpen();
 
+    hx_sense_off(false);
     return true;
-}
-
-void thp_afe_frame_solve(std::array<uint8_t, 8192>* frame_buffer) {
-    uint32_t i = 5;
-    for ( ; i < 4805; ) {
-        uint8_t highBytes = frame_buffer->at(i);
-        uint8_t lowBytes = frame_buffer->at(++i);
-
-        uint16_t rawData = (highBytes << 8) | lowBytes;
-        if (rawData < 33568 && rawData > 27768) {
-            rawData = 0;
-        }
-    }
-}
-
-bool Chip::TouchEngine() {
-    std::array<uint8_t, 8192> frame_buffer{};
-    THP_AFE_MODE last_mode;
-
-    uint32_t master_len = 0;
-    uint32_t slave_len = 0;
-    //开启
-    thp_afe_start();
-    
-    //工作
-    while (isRuning) {
-        if (afe_mode != last_mode) {
-            
-        }
-        m_interrupt->WaitInterrupt();
-        m_slave->GetFrame(frame_buffer.data() + 5120, 339, &slave_len);
-        m_master->GetFrame(frame_buffer.data(), 5063, &master_len);
-
-        thp_afe_frame_solve(&frame_buffer);
-    }
-
-    //退出
-    return hx_sense_off(false);
 }
 } // namespace Himax

@@ -27,7 +27,7 @@ ic_operation InitIcOperation() {
     op.adr_i2c_psw_ub = 0x32;
     op.data_ahb_access_direction_read = 0x00;
     op.data_conti = 0x31;
-    op.data_incr4 = 0x10;
+    op.data_incr4 = 0x12;
     op.data_i2c_psw_lb = 0x27;
     op.data_i2c_psw_ub = 0x95;
     op.addr_tcon_on_rst = 0x80020020;

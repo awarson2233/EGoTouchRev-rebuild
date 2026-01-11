@@ -466,7 +466,8 @@ namespace Himax {
             return false;
         }
 
-        if (!dev->WriteBus(0x0C, nullptr, 0x00, 1)) {
+        tmp_data[0] = 0;
+        if (!dev->WriteBus(0x0C, nullptr, tmp_data, 1)) {
             dev->GetError();
             return false;
         }
