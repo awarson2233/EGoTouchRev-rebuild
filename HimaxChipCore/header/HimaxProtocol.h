@@ -8,13 +8,26 @@
  */
 // HimaxHal.h
 #pragma once
-#include <cstdint>
-#include <mutex>
 #include <vector>
+#include <expected>
 #include <windows.h>
 #include <winnt.h>
 
 namespace Himax {
+    // 芯片错误码定义
+    enum class ChipError {
+        Success = 0,
+        CommunicationError,  // 底层驱动/总线通讯故障 (Handle, IOCTL, Read/Write)
+        Timeout,             // 操作超时 (Interrupt, Reloading, Status polling)
+        VerificationFailed,  // 逻辑校验失败 (Verify failed, FW Status error)
+        InvalidOperation,    // 调用时机或参数非法 (Invalid param, State error, Not ready)
+        InternalError        // 内部逻辑异常
+    };
+
+    // 错误处理别名
+    template <typename T = void>
+    using ChipResult = std::expected<T, ChipError>;
+
     enum class DeviceType { Master, Slave, Interrupt };
     
     class HalDevice {
@@ -23,19 +36,19 @@ namespace Himax {
         ~HalDevice();
 
         bool IsValid() const;
-        bool Ioctl(DWORD code, const void* in, uint32_t inLen, void* out,
+        ChipResult<> Ioctl(DWORD code, const void* in, uint32_t inLen, void* out,
                    uint32_t outLen, uint32_t* retLen);
-        bool Read(void* buffer, uint32_t len);
-        bool WaitInterrupt();
-        bool ReadBus(uint8_t cmd, uint8_t* data, uint32_t len);
-        bool WriteBus(const uint8_t cmd, const uint8_t* addr, const uint8_t* data, uint32_t len);
-        bool ReadAcpi(uint8_t* data, uint32_t len);
-        bool GetFrame(void* buffer, uint32_t outLen, uint32_t* retLen);
-        bool SetTimeOut(uint8_t millisecond);
-        bool SetBlock(bool status);
-        bool SetReset(bool state);
-        bool IntOpen(void);
-        bool IntClose(void);
+        ChipResult<> Read(void* buffer, uint32_t len);
+        ChipResult<> WaitInterrupt();
+        ChipResult<> ReadBus(uint8_t cmd, uint8_t* data, uint32_t len);
+        ChipResult<> WriteBus(const uint8_t cmd, const uint8_t* addr, const uint8_t* data, uint32_t len);
+        ChipResult<> ReadAcpi(uint8_t* data, uint32_t len);
+        ChipResult<> GetFrame(void* buffer, uint32_t outLen, uint32_t* retLen);
+        ChipResult<> SetTimeOut(uint8_t millisecond);
+        ChipResult<> SetBlock(bool status);
+        ChipResult<> SetReset(bool state);
+        ChipResult<> IntOpen(void);
+        ChipResult<> IntClose(void);
         DWORD GetError(void);
 
     private:
@@ -52,18 +65,17 @@ namespace Himax {
         
         OVERLAPPED m_ov = {};
         std::vector<uint8_t> m_xfer_buffer;
-        std::recursive_mutex m_mutex;
     };
 
     namespace HimaxProtocol {
 
-        bool burst_enable(HalDevice *dev, bool isEnable);
-        bool register_read(HalDevice *dev, const uint32_t addr, uint8_t* buffer, uint32_t len);
-        bool register_write(HalDevice *dev, const uint32_t addr, const uint8_t* buffer, uint32_t len);
+        ChipResult<> burst_enable(HalDevice *dev, bool isEnable);
+        ChipResult<> register_read(HalDevice *dev, const uint32_t addr, uint8_t* buffer, uint32_t len);
+        ChipResult<> register_write(HalDevice *dev, const uint32_t addr, const uint8_t* buffer, uint32_t len);
 
         void build_command_packet(uint8_t cmd_id, uint8_t cmd_val, uint8_t* packet);
-        bool write_and_verify(HalDevice* dev, const uint32_t addr, const uint8_t* data, uint32_t len, uint32_t verify_len = 0);
-        bool safeModeSetRaw(HalDevice* dev, const bool state);
+        ChipResult<> write_and_verify(HalDevice* dev, const uint32_t addr, const uint8_t* data, uint32_t len, uint32_t verify_len = 0);
+        ChipResult<> safeModeSetRaw(HalDevice* dev, const bool state);
         
         /**
          * @brief 向芯片发送命令包
@@ -71,8 +83,8 @@ namespace Himax {
          * @param cmd_id 命令 ID
          * @param cmd_val 命令值
          * @param current_slot 当前 slot（会被更新）
-         * @return bool 是否成功
+         * @return ChipResult 是否成功
          */
-        bool send_command(HalDevice* dev, uint8_t cmd_id, uint8_t cmd_val, uint8_t& current_slot);
+        ChipResult<> send_command(HalDevice* dev, uint8_t cmd_id, uint8_t cmd_val, uint8_t& current_slot);
     }
 }

@@ -17,6 +17,9 @@
 #include <windows.h>
 #include <winscard.h>
 
+using Himax::ChipError;
+using Himax::ChipResult;
+
 constexpr uint8_t OP_WRITE_MASTER = 0xF2;
 constexpr uint8_t OP_READ_MASTER  = 0xF3;
 constexpr uint8_t OP_WRITE_SLAVE  = 0xF4;
@@ -47,19 +50,17 @@ namespace {
      * @return bool 是否成功
      */
     template<typename Func>
-    bool PerformSyncIo(HANDLE handle, std::recursive_mutex& mutex, DWORD& lastError, Func ioFunc, DWORD expectedLen = 0, bool checkLen = false, DWORD* outBytes = NULL) {
+    Himax::ChipResult<> PerformSyncIo(HANDLE handle, DWORD& lastError, Func ioFunc, Himax::ChipError errType, DWORD expectedLen = 0, bool checkLen = false, DWORD* outBytes = NULL) {
         if (handle == INVALID_HANDLE_VALUE) {
             lastError = ERROR_INVALID_HANDLE;
-            return false;
+            return std::unexpected(Himax::ChipError::CommunicationError);
         }
         OVERLAPPED ov = {0};
         ov.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
         if (!ov.hEvent) {
             lastError = GetLastError();
-            return false;
+            return std::unexpected(Himax::ChipError::InternalError);
         }
-
-        std::lock_guard<std::recursive_mutex> lock(mutex);
 
         DWORD bytesTransferred = 0;
         BOOL res = ioFunc(&ov, &bytesTransferred);
@@ -79,16 +80,15 @@ namespace {
         }
         CloseHandle(ov.hEvent);
 
-        if (!res) return false;
+        if (!res) return std::unexpected(errType);
         if (checkLen && bytesTransferred != expectedLen) {
-            // 实际写入长度与预期不符
             lastError = ERROR_WRITE_FAULT;
-            return false;
+            return std::unexpected(ChipError::CommunicationError);
         }
         
         if (outBytes) *outBytes = bytesTransferred;
         lastError = 0;
-        return true;
+        return {};
     }
 }
 
@@ -164,12 +164,12 @@ namespace Himax {
      * @param retLen 实际返回长度
      * @return bool 是否成功
      */
-    bool HalDevice::Ioctl(DWORD code, const void* in, uint32_t inLen, void* out, uint32_t outLen, uint32_t* retLen) {
-        bool result = false;
+    ChipResult<> HalDevice::Ioctl(DWORD code, const void* in, uint32_t inLen, void* out, uint32_t outLen, uint32_t* retLen) {
+        ChipResult<> result = std::unexpected(ChipError::InternalError);
         for (int cnt = 0; cnt < 10; cnt++) {
-            result = PerformSyncIo(m_handle, m_mutex, m_lastError, [&](OVERLAPPED* pov, LPDWORD pBytes) {
+            result = PerformSyncIo(m_handle, m_lastError, [&](OVERLAPPED* pov, LPDWORD pBytes) {
                 return DeviceIoControl(m_handle, code, (LPVOID)in, inLen, out, outLen, pBytes, pov);
-            }, 0, false, (DWORD*)retLen);
+            }, ChipError::CommunicationError, 0, false, (DWORD*)retLen);
             if (result) break;
         }
 
@@ -182,24 +182,22 @@ namespace Himax {
      * @param len 读取长度
      * @return bool 是否成功
      */
-    bool HalDevice::Read(void* buffer, uint32_t len) {
-        return PerformSyncIo(m_handle, m_mutex, m_lastError, [&](OVERLAPPED* pov, LPDWORD pBytes){
+    ChipResult<> HalDevice::Read(void* buffer, uint32_t len) {
+        return PerformSyncIo(m_handle, m_lastError, [&](OVERLAPPED* pov, LPDWORD pBytes){
             return ReadFile(m_handle, buffer, len, pBytes, pov);
-        });
+        }, ChipError::CommunicationError);
     }
 
     /**
      * @brief 等待设备中断触发
      * @return bool 是否成功触发
      */
-    bool HalDevice::WaitInterrupt() {
+    ChipResult<> HalDevice::WaitInterrupt() {
         if (!IsValid() || !m_ov.hEvent) { 
             m_lastError = ERROR_INVALID_HANDLE;
-            return false; 
+            return std::unexpected(ChipError::CommunicationError); 
         }
 
-        std::lock_guard<std::recursive_mutex> lock(m_mutex);
-        
         ResetEvent(m_ov.hEvent);
         
         DWORD bytesReturned = 0;
@@ -213,25 +211,25 @@ namespace Himax {
 
         if (!res && GetLastError() != ERROR_IO_PENDING) {
             m_lastError = GetLastError();
-            return false;
+            return std::unexpected(ChipError::CommunicationError);
         }
 
         DWORD waitResult = WaitForSingleObject(m_ov.hEvent, 200);
 
         if (waitResult != WAIT_OBJECT_0) {
             m_lastError = (waitResult == WAIT_FAILED) ? GetLastError() : ERROR_GEN_FAILURE;
-            return false;
+            return std::unexpected(ChipError::Timeout);
         }
 
         BOOL ok = GetOverlappedResult(m_handle, &m_ov, &bytesReturned, FALSE);
         if (!ok) {
             m_lastError = GetLastError();
-            return false;
+            return std::unexpected(ChipError::CommunicationError);
         }
 
         ResetEvent(m_ov.hEvent);
         m_lastError = 0;
-        return true;
+        return {};
     }
 
 
@@ -242,9 +240,7 @@ namespace Himax {
      * @param len 读取长度
      * @return bool 是否成功
      */
-    bool HalDevice::ReadBus(uint8_t cmd, uint8_t* data, uint32_t len) {
-        std::lock_guard<std::recursive_mutex> lock(m_mutex);
-        bool res = false;
+    ChipResult<> HalDevice::ReadBus(uint8_t cmd, uint8_t* data, uint32_t len) {
         size_t total_size = data_offset + len;
 
         m_xfer_buffer.clear();
@@ -256,18 +252,20 @@ namespace Himax {
         m_xfer_buffer.resize(total_size, 0);
 
         uint32_t retLen = 0;
-        res = Ioctl(SPI_IOCTL_FULL_DUPLEX, 
+        auto res = Ioctl(SPI_IOCTL_FULL_DUPLEX, 
                             m_xfer_buffer.data(), m_xfer_buffer.size(), 
                             m_xfer_buffer.data(), m_xfer_buffer.size(), 
                             &retLen);
         
-        if (res) {
-            if (retLen >= total_size) {
-                memcpy(data, m_xfer_buffer.data() + data_offset, len);
-            }
+        if (!res) return std::unexpected(ChipError::CommunicationError);
+
+        if (retLen < total_size) {
+            return std::unexpected(ChipError::CommunicationError);
         }
+
+        memcpy(data, m_xfer_buffer.data() + data_offset, len);
         
-        return res;
+        return {};
     }
 
     /**
@@ -278,8 +276,8 @@ namespace Himax {
      * @param len 数据长度
      * @return bool 是否成功
      */
-    bool HalDevice::WriteBus(const uint8_t cmd, const uint8_t* addr, const uint8_t* data, const uint32_t len) {
-        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    ChipResult<> HalDevice::WriteBus(const uint8_t cmd, const uint8_t* addr, const uint8_t* data, const uint32_t len) {
+        m_xfer_buffer.clear();
 
         m_xfer_buffer.clear();
         m_xfer_buffer.push_back(m_writeOp);
@@ -293,9 +291,9 @@ namespace Himax {
         }
 
 
-        return PerformSyncIo(m_handle, m_mutex, m_lastError, [&](OVERLAPPED* pov, LPDWORD pBytes){
+        return PerformSyncIo(m_handle, m_lastError, [&](OVERLAPPED* pov, LPDWORD pBytes){
             return WriteFile(m_handle, m_xfer_buffer.data(), (DWORD)m_xfer_buffer.size(), NULL, pov);
-        });
+        }, ChipError::CommunicationError);
     }
 
     /**
@@ -304,20 +302,20 @@ namespace Himax {
      * @param len 读取长度
      * @return bool 是否成功
      */
-    bool HalDevice::ReadAcpi(uint8_t* data, uint32_t len) {
-        std::lock_guard<std::recursive_mutex> lock(m_mutex);
-        bool res = false;
+    ChipResult<> HalDevice::ReadAcpi(uint8_t* data, uint32_t len) {
         m_xfer_buffer.assign(len, 0);
         
         uint32_t retLen = 0;
 
-        res =  Ioctl(SPI_IOCTL_READ_ACPI, nullptr, 0, m_xfer_buffer.data(), len, &retLen);
-        if (res) {
-            if (retLen >= len) {
-                memcpy(data, m_xfer_buffer.data(), len);
-            }
+        auto res = Ioctl(SPI_IOCTL_READ_ACPI, nullptr, 0, m_xfer_buffer.data(), len, &retLen);
+        if (!res) return std::unexpected(ChipError::CommunicationError);
+
+        if (retLen < len) {
+            return std::unexpected(ChipError::CommunicationError);
         }
-        return res;
+        
+        memcpy(data, m_xfer_buffer.data(), len);
+        return {};
     }
 
     /**
@@ -327,7 +325,7 @@ namespace Himax {
      * @param retLen 实际返回长度
      * @return bool 是否成功
      */
-    bool HalDevice::GetFrame(void* buffer, uint32_t outLen, uint32_t *retLen){
+    ChipResult<> HalDevice::GetFrame(void* buffer, uint32_t outLen, uint32_t *retLen){
         return Ioctl(SPI_IOCTL_GET_FRAME, NULL, 0, buffer, outLen, retLen);
     }
 
@@ -336,8 +334,7 @@ namespace Himax {
      * @param milisecond 毫秒数
      * @return bool 是否成功
      */
-    bool HalDevice::SetTimeOut(uint8_t milisecond) {
-        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    ChipResult<> HalDevice::SetTimeOut(uint8_t milisecond) {
         uint32_t timeout = static_cast<uint32_t>(milisecond);
         return Ioctl(SPI_IOCTL_SET_TIMEOUT, &timeout, sizeof(timeout), NULL, 0, NULL);
     }
@@ -347,8 +344,8 @@ namespace Himax {
      * @param state true 为阻塞, false 为非阻塞
      * @return bool 是否成功
      */
-    bool HalDevice::SetBlock(bool state) {
-        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    ChipResult<> HalDevice::SetBlock(bool state) {
+        m_xfer_buffer.clear();
 
         m_xfer_buffer.clear();
         m_xfer_buffer.push_back(uint8_t(state));
@@ -362,22 +359,16 @@ namespace Himax {
      * @param state true 为拉高复位, false 为拉低复位
      * @return bool 是否成功
      */
-    bool HalDevice::SetReset(bool state) {
-        std::lock_guard<std::recursive_mutex> lock(m_mutex);
-        
-        m_xfer_buffer.clear();
-        m_xfer_buffer.push_back(uint8_t(state));
-        m_xfer_buffer.resize(4, 0);
-
-        return Ioctl(SPI_IOCTL_SET_RESET, m_xfer_buffer.data(), 4, NULL, 0, NULL);  
+    ChipResult<> HalDevice::SetReset(bool state) {
+        uint32_t val = state ? 1 : 0;
+        return Ioctl(SPI_IOCTL_SET_RESET, &val, sizeof(val), NULL, 0, NULL);  
     }
 
     /**
      * @brief 打开中断监听
      * @return bool 是否成功
      */
-    bool HalDevice::IntOpen(void) {
-        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    ChipResult<> HalDevice::IntOpen(void) {
         return Ioctl(SPI_IOCTL_INT_OPEN, NULL, 0, NULL, 0, NULL);
     }
 
@@ -385,8 +376,7 @@ namespace Himax {
      * @brief 关闭中断监听
      * @return bool 是否成功
      */
-    bool HalDevice::IntClose(void) {
-        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    ChipResult<> HalDevice::IntClose(void) {
         return Ioctl(SPI_IOCTL_INT_CLOSE, NULL, 0, NULL, 0, NULL);
     }
 
@@ -398,24 +388,22 @@ namespace Himax {
         return m_lastError;
     }
 
-    bool HimaxProtocol::burst_enable(HalDevice *dev, bool isEnable) {
-        if (!dev || !dev->IsValid()) return false;
+    ChipResult<> HimaxProtocol::burst_enable(HalDevice *dev, bool isEnable) {
+        if (!dev || !dev->IsValid()) return std::unexpected(ChipError::CommunicationError);
 
         uint8_t tmp_data[4]{};
         tmp_data[0] = 0x31;
 
-        if (!dev->WriteBus(0x13, nullptr, tmp_data, 1)) {
-            dev->GetError();
-            return false;
+        if (auto res = dev->WriteBus(0x13, nullptr, tmp_data, 1); !res) {
+            return res;
         }
 
         tmp_data[0] = (0x12 | isEnable);
 
-        if (!dev->WriteBus(0x0D, nullptr, tmp_data, 1)) {
-            dev->GetError();
-            return false;
+        if (auto res = dev->WriteBus(0x0D, nullptr, tmp_data, 1); !res) {
+            return res;
         }
-        return true;
+        return {};
     }
 
     /**
@@ -444,51 +432,46 @@ namespace Himax {
         }
     }
 
-    bool HimaxProtocol::register_read(HalDevice *dev, const uint32_t addr, uint8_t *buffer, uint32_t len) {
-        if (!dev || !dev->IsValid()) return false;
+    ChipResult<> HimaxProtocol::register_read(HalDevice *dev, const uint32_t addr, uint8_t *buffer, uint32_t len) {
+        if (!dev || !dev->IsValid()) return std::unexpected(ChipError::CommunicationError);
 
         uint8_t tmp_data[4];
-        int i = 0;
-        int address = 0;
         himax_parse_assign_cmd(addr, tmp_data, 4);
 
         if (len > 256) {
-            return false;
+            return std::unexpected(ChipError::InvalidOperation);
         }
         if (len > 4) {
-            burst_enable(dev, true);
+            if (auto res = burst_enable(dev, true); !res) return res;
         } else {
-            burst_enable(dev, false);
+            if (auto res = burst_enable(dev, false); !res) return res;
         }
 
-        if (!dev->WriteBus(0x00, tmp_data, nullptr, 0)) {
-            dev->GetError();
-            return false;
+        if (auto res = dev->WriteBus(0x00, tmp_data, nullptr, 0); !res) {
+            return res;
         }
 
         tmp_data[0] = 0;
-        if (!dev->WriteBus(0x0C, nullptr, tmp_data, 1)) {
-            dev->GetError();
-            return false;
+        if (auto res = dev->WriteBus(0x0C, nullptr, tmp_data, 1); !res) {
+            return res;
         }
 
-        if (!dev->ReadBus(0x08, buffer, len)) {
-            dev->GetError();
-            return false;
+        if (auto res = dev->ReadBus(0x08, buffer, len); !res) {
+            return res;
         }
         
-        return true;
+        return {};
     }
 
-    bool HimaxProtocol::register_write(HalDevice *dev, const uint32_t addr, const uint8_t *data, uint32_t len) {
-        if (!dev || !dev->IsValid()) return false;
+    ChipResult<> HimaxProtocol::register_write(HalDevice *dev, const uint32_t addr, const uint8_t *data, uint32_t len) {
+        if (!dev || !dev->IsValid()) return std::unexpected(ChipError::CommunicationError);
         uint8_t tmp_data[4];
         himax_parse_assign_cmd(addr, tmp_data, 4);
 
         if (len > 4) {
-            burst_enable(dev, 1);
+            if (auto res = burst_enable(dev, 1); !res) return res;
         } else {
-            burst_enable(dev, 0);
+            if (auto res = burst_enable(dev, 0); !res) return res;
         }
         return dev->WriteBus(0x00, tmp_data, data, len);
     }
@@ -498,8 +481,8 @@ namespace Himax {
             return;
         }
 
-        // 1. 初始化缓冲区为 0 (对应 local_5b = 0, local_50 = 0 等初始化)
-        std::array<uint8_t, 18> tmp_data{};
+        // 1. 初始化 16 字节缓冲区 (对应 DLL 中的局部变量布局)
+        std::array<uint8_t, 16> tmp_data{};
 
         // 2. 设置包含“虚拟包头”的初始值，用于计算 CheckSum
         tmp_data[0] = 0xA8;     // local_60[0]
@@ -522,29 +505,29 @@ namespace Himax {
         // 逻辑：0x10000 - Sum，并截断为 16 位
         uint16_t final_checksum = static_cast<uint16_t>((0x10000 - checksum_sum) & 0xFFFF);
 
-        // 5. 填入校验和 (Little Endian)
-        tmp_data[16] = final_checksum & 0xFF;         // Low Byte
-        tmp_data[17] = (final_checksum >> 8) & 0xFF;  // High Byte
+        // 5. 填入校验和 (位置必须在 16 字节包内，通常是最后两个字节)
+        tmp_data[14] = final_checksum & 0xFF;         // Low Byte
+        tmp_data[15] = (final_checksum >> 8) & 0xFF;  // High Byte
 
         // 6. 关键步骤：发送前清除包头
         tmp_data[0] = 0x00;
         tmp_data[1] = 0x00;
 
-        std::memcpy(packet, tmp_data.data(), tmp_data.size());    
+        std::memcpy(packet, tmp_data.data(), 16);    
     }
 
-    bool HimaxProtocol::write_and_verify(HalDevice* dev, const uint32_t addr, const uint8_t* data, uint32_t len, uint32_t verify_len) {
-        if (!dev || !dev->IsValid()) return false;
+    ChipResult<> HimaxProtocol::write_and_verify(HalDevice* dev, const uint32_t addr, const uint8_t* data, uint32_t len, uint32_t verify_len) {
+        if (!dev || !dev->IsValid()) return std::unexpected(ChipError::CommunicationError);
 
         std::vector<uint8_t> write_buf(data, data + len);
         std::vector<uint8_t> read_buf(len, 0);
 
-        if (!register_write(dev, addr, data, len)) {
-            return false;
+        if (auto res = register_write(dev, addr, data, len); !res) {
+            return res;
         }
 
-        if (!register_read(dev, addr, read_buf.data(), len)) {
-            return false;
+        if (auto res = register_read(dev, addr, read_buf.data(), len); !res) {
+            return res;
         }
 
         uint32_t cmp_len = verify_len;
@@ -556,10 +539,10 @@ namespace Himax {
         }
 
         if (std::equal(write_buf.begin(), write_buf.begin() + cmp_len, read_buf.begin())) {
-            return true;
+            return {};
         }
 
-        return false;
+        return std::unexpected(ChipError::VerificationFailed);
     }
 
     /**
@@ -571,58 +554,58 @@ namespace Himax {
     *              - false: 退出 Safe Mode (写入 {0x00, 0x00} 到 0x31)
     * @return bool 操作是否成功
     */
-    bool HimaxProtocol::safeModeSetRaw(HalDevice* dev, const bool state) {
-    if (!dev || !dev->IsValid()) return false;
-    uint8_t tmp_data[2]{};
-    const uint8_t adr_i2c_psw_lb = 0x31;
+    ChipResult<> HimaxProtocol::safeModeSetRaw(HalDevice* dev, const bool state) {
+        if (!dev || !dev->IsValid()) return std::unexpected(ChipError::CommunicationError);
+        uint8_t tmp_data[2]{};
+        const uint8_t adr_i2c_psw_lb = 0x31;
 
-    if (state == 1) {
-        tmp_data[0] = 0x27;
-        tmp_data[1] = 0x95;
-        if (!dev->WriteBus(adr_i2c_psw_lb, nullptr, tmp_data, 2)) return false;
-        if (!dev->ReadBus(adr_i2c_psw_lb, tmp_data, 2)) return false;
+        if (state == 1) {
+            tmp_data[0] = 0x27;
+            tmp_data[1] = 0x95;
+            if (auto res = dev->WriteBus(adr_i2c_psw_lb, nullptr, tmp_data, 2); !res) return res;
+            if (auto res = dev->ReadBus(adr_i2c_psw_lb, tmp_data, 2); !res) return res;
 
-        const bool ok = (tmp_data[0] == 0x27 && tmp_data[1] == 0x95);
-        return ok;
-    } else {
-        if (!dev->WriteBus(adr_i2c_psw_lb, nullptr, tmp_data, 2)) return false;
-        if (!dev->ReadBus(adr_i2c_psw_lb, tmp_data, 2)) return false;
+            if (tmp_data[0] == 0x27 && tmp_data[1] == 0x95) return {};
+            return std::unexpected(ChipError::VerificationFailed);
+        } else {
+            if (auto res = dev->WriteBus(adr_i2c_psw_lb, nullptr, tmp_data, 2); !res) return res;
+            if (auto res = dev->ReadBus(adr_i2c_psw_lb, tmp_data, 2); !res) return res;
 
-        const bool ok = (tmp_data[0] == 0x00 && tmp_data[1] == 0x00);
-        return ok;
+            if (tmp_data[0] == 0x00 && tmp_data[1] == 0x00) return {};
+            return std::unexpected(ChipError::VerificationFailed);
+        }
     }
-}
 
-    bool HimaxProtocol::send_command(HalDevice* dev, uint8_t cmd_id, uint8_t cmd_val, uint8_t& current_slot) {
-        if (!dev || !dev->IsValid()) return false;
+    ChipResult<> HimaxProtocol::send_command(HalDevice* dev, uint8_t cmd_id, uint8_t cmd_val, uint8_t& current_slot) {
+        if (!dev || !dev->IsValid()) return std::unexpected(ChipError::CommunicationError);
 
         constexpr uint32_t BASE_ADDR = 0x10007550;
         const uint32_t addr = BASE_ADDR + static_cast<uint32_t>(current_slot) * 0x10;
         
 
-        // 构建命令包 (18 字节，但只写入 16 字节数据部分)
-        std::array<uint8_t, 18> packet{};
+        // 构建命令包
+        std::array<uint8_t, 16> packet{};
         build_command_packet(cmd_id, cmd_val, packet.data());
 
         // 写入命令包到对应 slot 地址
-        if (!register_write(dev, addr, packet.data(), 16)) {
-            return false;
+        if (auto res = register_write(dev, addr, packet.data(), 16); !res) {
+            return res;
         }
 
-        // 写入触发标记 (0xA8, 0x8A)
-        std::array<uint8_t, 4> trigger = {0xA8, 0x8A, 0x00, 0x00};
-        if (!register_write(dev, addr, trigger.data(), 4)) {
-            return false;
+        // 写入触发标记 (0xA8, 0x8A, cmd_id, 0x00)
+        std::array<uint8_t, 4> trigger = {0xA8, 0x8A, cmd_id, 0x00};
+        if (auto res = register_write(dev, addr, trigger.data(), 4); !res) {
+            return res;
         }
 
         // 读取确认
         std::array<uint8_t, 16> read_buf{};
-        if (!register_read(dev, addr, read_buf.data(), 16)) {
-            return false;
+        if (auto res = register_read(dev, addr, read_buf.data(), 16); !res) {
+            return res;
         }
 
         // 更新 slot (循环使用 0-4)
         current_slot = (current_slot + 1) % 5;
-        return true;
+        return {};
     }
 }

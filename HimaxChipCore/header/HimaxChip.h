@@ -61,26 +61,26 @@ namespace Himax {
             zf_operation        pzf_op{};
         
             
-            HalDevice* SelectDevice(DeviceType type);
-            bool check_bus(void);
-            bool init_buffers_and_register(void);
+            ChipResult<HalDevice*> SelectDevice(DeviceType type);
+            ChipResult<> check_bus(void);
+            ChipResult<> init_buffers_and_register(void);
             
-            bool hx_hw_reset_ahb_intf(DeviceType type);
-            bool hx_sw_reset_ahb_intf(DeviceType type); 
-            bool hx_is_reload_done_ahb(void);
-            bool himax_mcu_reload_disable(uint8_t disable);
-            bool himax_mcu_read_FW_status(void);
+            ChipResult<> hx_hw_reset_ahb_intf(DeviceType type);
+            ChipResult<> hx_sw_reset_ahb_intf(DeviceType type); 
+            ChipResult<> hx_is_reload_done_ahb(void);
+            ChipResult<> himax_mcu_reload_disable(uint8_t disable);
+            ChipResult<> himax_mcu_read_FW_status(void);
 
-            bool hx_sense_on(bool isHwReset);
-            bool hx_sense_off(bool check_en);
-            bool himax_mcu_power_on_init(void);
-            bool switch_afe_mode(AFE_Command cmd, uint8_t param = 0);
+            ChipResult<> hx_sense_on(bool isHwReset);
+            ChipResult<> hx_sense_off(bool check_en);
+            ChipResult<> himax_mcu_power_on_init(void);
+            ChipResult<> switch_afe_mode(AFE_Command cmd, uint8_t param = 0);
 
-            bool himax_mcu_assign_sorting_mode(uint8_t* tmp_data);
-            bool himax_switch_data_type(DeviceType device, THP_INSPECTION_ENUM mode);
-            bool himax_switch_mode_inspection(THP_INSPECTION_ENUM mode);
-            void himax_mcu_interface_on(void);
-            bool hx_set_N_frame(uint8_t nFrame);
+            ChipResult<> himax_mcu_assign_sorting_mode(uint8_t* tmp_data);
+            ChipResult<> himax_switch_data_type(DeviceType device, THP_INSPECTION_ENUM mode);
+            ChipResult<> himax_switch_mode_inspection(THP_INSPECTION_ENUM mode);
+            ChipResult<> himax_mcu_interface_on(void);
+            ChipResult<> hx_set_N_frame(uint8_t nFrame);
 
             // 统一的 AFE 模式切换接口
         public:
@@ -88,7 +88,16 @@ namespace Himax {
             std::atomic_bool isRuning;
             THP_AFE_MODE afe_mode;
 
-            bool thp_afe_start(void);
+            ChipResult<> thp_afe_start(void);
+            ChipResult<> thp_afe_enter_idle(uint8_t param = 0);
+            ChipResult<> thp_afe_force_exit_idle(void);
+            ChipResult<> thp_afe_start_calibration(uint8_t param = 0);
+            ChipResult<> thp_afe_enable_freq_shift(void);
+            ChipResult<> thp_afe_disable_freq_shift(void);
+            ChipResult<> thp_afe_clear_status(uint8_t cmd_val);
+            ChipResult<> thp_afe_force_to_freq_point(uint8_t freq_idx);
+            ChipResult<> thp_afe_force_to_scan_rate(uint8_t rate_idx);
+
             Chip(const std::wstring& master_path, const std::wstring& slave_path, const std::wstring& interrupt_path);
             bool IsReady(DeviceType type) const;
     };
