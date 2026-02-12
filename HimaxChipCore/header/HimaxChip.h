@@ -27,11 +27,16 @@ namespace Himax {
         HX_BACK_NORMAL = 3,
     };
 
+    enum class THP_MODE{
+        
+    };
+    
     enum class THP_AFE_MODE {
         Stop = 0,
-        Normal = 1,
-        Idle = 2,
-        Turbo = 3,
+
+        Normal = 2,
+        Idle = 3,
+        Turbo = 4,
     };
 
     // AFE 命令类型
@@ -100,5 +105,6 @@ namespace Himax {
 
             Chip(const std::wstring& master_path, const std::wstring& slave_path, const std::wstring& interrupt_path);
             bool IsReady(DeviceType type) const;
+            ChipResult<> Run(void);
     };
 }

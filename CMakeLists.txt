@@ -53,7 +53,7 @@ target_link_libraries(HimaxChipCore PUBLIC Common)
 
 # --- EGoTouchService (Main Service Executable) ---
 # 定义源文件和头文件路径
-set(SERVICE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/EGoTouchService")
+set(SERVICE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Service")
 file(GLOB SERVICE_SOURCES "${SERVICE_ROOT}/source/*.cpp")
 file(GLOB SERVICE_HEADERS "${SERVICE_ROOT}/header/*.h")
 

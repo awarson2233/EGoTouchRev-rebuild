@@ -744,4 +744,8 @@ ChipResult<> Chip::thp_afe_start(void) {
 
     return {};
 }
+
+ChipResult<> Chip::Run(void) {
+    
+}
 } // namespace Himax
