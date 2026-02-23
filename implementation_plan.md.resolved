@@ -1,0 +1,109 @@
+# 驱动架构方案设计 (Driver Architecture Design)
+
+基于项目的现有结构（包含 `HimaxChipCore`、`Service`、`Common`、`GUI`）以及您的需求，以下是为该基于 VHF (Virtual HID Framework) 的触摸驱动设计的总体架构方案。
+
+## 1. 架构分层 (Architecture Layers)
+
+整体架构可分为5个核心层：
+
+
+---
+
+## 4. 全新文件结构与模块重命名设计 (Redesigned File Structure & Naming)
+
+考虑到 `HimaxChipCore` 和 `Service` 这样的命名不够优雅和模块化，我对项目的**根目录结构和核心模块名**进行了彻底的重新设计。这套新命名遵循现代 C++ 项目的最佳实践（如基于功能的划分）。
+
+### 全新的四大核心模块 (New Module Definitions)：
+1. **`App`** (原 `Service` / `GUI` 的顶层入口)
+   - 包含主程序的启动、调度以及可视化调试 GUI。
+2. **[Device](file:///d:/source/repos/EGoTouchRev-rebuild/HimaxChipCore/source/HimaxChip.cpp#71-96)** (原 `HimaxChipCore`)
+   - 专门负责所有物理硬件（如 Himax 芯片）的驱动抽象和 I2C/SPI 底层交互。
+3. **`Engine`** (原拟新增的 `TouchDSP`)
+   - 触摸信号**解算引擎**的专属空间。负责纯粹的算法运算（基线、连通域、质心）。
+4. **`Host`** (原拟新增的 `VHFComm` 和系统交互部分)
+   - 负责与 **操作系统 (Windows)** 之间的集成交互，包括 VHF 虚拟设备注入以及电源/屏幕状态的监听。
+
+### 具体目录结构树 (Directory Tree)：
+
+```text
+EGoTouchRev-rebuild/
+├── App/                         <-- 【入口与调度层】
+│   ├── include/
+│   │   ├── Coordinator.h        # 统管三线程生命周期的“大脑”
+│   │   ├── RingBuffer.h         # 高性能无锁环形队列 (跨线程通信)
+│   │   └── DiagnosticUI.h       # 可视化监控 (原 GUI)
+│   └── source/
+│       ├── main.cpp             # 入口
+│       ├── Coordinator.cpp      # 线程组装和启动逻辑
+│       └── DiagnosticUI.cpp
+│
+├── Device/                      <-- 【硬件抽象层】(原 HimaxChipCore)
+│   ├── include/
+│   │   ├── HimaxDriver.h        # 对外暴露的芯片控制类 (原 HimaxChip.h)
+│   │   ├── HimaxProtocol.h      
+│   │   └── HimaxRegisters.h
+│   └── source/
+│       ├── HimaxDriver.cpp
+│       └── HimaxProtocol.cpp
+│
+├── Engine/                      <-- 【触控解算引擎】(纯算法层)
+│   ├── include/
+│   │   ├── EngineTypes.h        # 热力图、TouchContact 等基础数据结构
+│   │   ├── SignalProcessor.h    # 负责去噪与滤波
+│   │   ├── BlobDetector.h       # 连通域与质心计算
+│   │   └── TouchTracker.h       # 触点 ID 追踪 (Up/Down/Update)
+│   └── source/
+│       ├── SignalProcessor.cpp
+│       ├── BlobDetector.cpp
+│       └── TouchTracker.cpp
+│
+├── Host/                        <-- 【系统集成层】
+│   ├── include/
+│   │   ├── VhfInjector.h        # 封装打包 HID Report 并调用 IOCTL 给系统内核
+│   │   ├── HidReportDesc.h      # PTP (精密触摸板) 的 USB 报文描述符
+│   │   └── SystemMonitor.h      # 监听屏幕亮灭、休眠唤醒事件 (原 SystemDectector)
+│   └── source/
+│       ├── VhfInjector.cpp
+│       └── SystemMonitor.cpp
+│
+└── Common/                      <-- 【公共依赖】
+    └── spdlog-1.17.0/           # 日志库等第三方依赖
+```
+
+### 架构优势
+- **极度解耦**：`Engine` 只管算数字，根本不知道数据来自 I2C 还是文件，也不知道结果要送给谁；`Host` 只关心跟 Windows 打交道。
+- **拓展性强**：日后如果还要支持其他型号的触摸芯片，直接在 [Device/](file:///d:/source/repos/EGoTouchRev-rebuild/HimaxChipCore/source/HimaxChip.cpp#71-96) 下增加如 `NovatekDriver.h` 即可。
+
+---
+
+## 2. 数据流与交互图 (Data Flow)
+
+```mermaid
+sequenceDiagram
+    participant HW as Himax controller
+    participant HAL as HimaxChipCore
+    participant DSP as Touch DSP Engine
+    participant VHF as User-Mode VHF Wrapper
+    participant KMD as KMDF VHF Driver
+    participant OS as Windows Input Subsystem
+
+    loop High Frequency Poll
+        HAL->>HW: 请求读取帧 (I2C/USB)
+        HW-->>HAL: 返回 Raw Heatmap
+        HAL->>DSP: 传递 Heatmap (通过 RingBuffer)
+        DSP->>DSP: 1. 基线相减 & 滤波
+        DSP->>DSP: 2. 质心运算 & 状态追踪
+        DSP-->>VHF: 输出 Contacts [ID, X, Y, State]
+        VHF->>VHF: 构建 Touch HID Report 报文
+        VHF->>KMD: DeviceIoControl(IOCTL_INJECT_TOUCH)
+        KMD->>KMD: VhfReadReportSubmit()
+        KMD-->>OS: OS 识别并分发触摸事件
+    end
+```
+
+## 3. 下一步行动建议 / 待确认项 (User Review Required)
+
+根据您的反馈，我们已经确认了以下关键信息：
+1. **解算算法状态**：【确认】目前没有现成算法，计划**配合 ImGui 可视化一步步从零实现**（这对我们的设计非常有利，可视化有助于立刻纠错）。
+2. **VHF 驱动通讯**：【确认】目前编写的是**纯用户态部分**，后续再逆向与 HID 虚拟设备的交互（因此我们可以先写一个 Dummy 的 VHF 注入类，把接口留好，后期填入真正的 IOCTL 逻辑）。
+3. **开发优先级**：【确认】**首要任务是实现 GUI 调试界面**，支持**手动控制芯片工作状态**，并**可视化原始热力图**。
