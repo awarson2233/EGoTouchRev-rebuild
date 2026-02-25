@@ -709,6 +709,8 @@ ChipResult<> Chip::switch_afe_mode(AFE_Command cmd, uint8_t param) {
 }
 
 ChipResult<> Chip::Init(void) {
+    if (auto res = hx_hw_reset_ahb_intf(DeviceType::Master); !res) return res;
+    Sleep(10);
     LOG_INFO("Device", "Chip::Init", GetStateStr(), "Starting initialization sequence...");
 
     std::array<uint8_t, 4> tmp_data = {0xA5, 0x5A, 0x00, 0x00};

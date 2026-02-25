@@ -9,6 +9,8 @@ class FramePipeline {
 public:
     void AddProcessor(std::unique_ptr<IFrameProcessor> processor);
     void RemoveProcessor(const std::string& name);
+    void MoveProcessorUp(size_t index);
+    void MoveProcessorDown(size_t index);
     
     // Execute the processors in sequence
     // Returns false if the frame is completely dropped by a processor

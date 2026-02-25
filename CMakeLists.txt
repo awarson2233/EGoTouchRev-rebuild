@@ -66,7 +66,14 @@ file(GLOB ENGINE_SOURCES "${ENGINE_ROOT}/source/*.cpp")
 file(GLOB ENGINE_HEADERS "${ENGINE_ROOT}/include/*.h")
 
 add_library(Engine STATIC
-    ${ENGINE_SOURCES}
+    Engine/source/MasterFrameParser.cpp
+    Engine/source/BaselineSubtraction.cpp
+    Engine/source/FramePipeline.cpp
+    Engine/source/DynamicDeadzoneFilter.cpp
+    Engine/source/SignalConditioningFilter.cpp
+    Engine/source/GaussianFilter.cpp
+    Engine/source/SpatialSharpenFilter.cpp
+    Engine/source/CentroidExtractor.cpp
     ${ENGINE_HEADERS}
 )
 

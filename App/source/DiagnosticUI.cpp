@@ -2,7 +2,10 @@
 #include "HimaxChip.h"
 #include "imgui.h"
 #include "Logger.h"
-
+#include <fstream>
+#include <iomanip>
+#include <sstream>
+#include <chrono>
 
 namespace App {
 
@@ -21,6 +24,9 @@ void DiagnosticUI::Render() {
     // 绘制控制面板和热力图窗口
     DrawControlPanel();
     DrawHeatmap();
+    DrawCoordinateTable();
+    DrawMasterSuffixTable();
+    DrawSlaveSuffixTable();
 }
 
 void DiagnosticUI::DrawControlPanel() {
@@ -86,20 +92,57 @@ void DiagnosticUI::DrawControlPanel() {
             if (!connected) ImGui::EndDisabled();
         }
     }
+    
+    ImGui::Separator();
+    if (ImGui::Button("Export Frame to CSV")) {
+        ExportCurrentFrameToCSV();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Export DVR (Last 120 Frames)")) {
+        if (m_coordinator) {
+            m_coordinator->TriggerDVRExport();
+        }
+    }
+    
     if (m_coordinator) {
         ImGui::Separator();
         ImGui::Text("Engine Pipeline Config");
-        for (const auto& processor : m_coordinator->GetPipeline().GetProcessors()) {
+        const auto& processors = m_coordinator->GetPipeline().GetProcessors();
+        for (size_t i = 0; i < processors.size(); ++i) {
+            auto& processor = processors[i];
+            ImGui::PushID(static_cast<int>(i));
+            
             bool enabled = processor->IsEnabled();
             if (ImGui::Checkbox(processor->GetName().c_str(), &enabled)) {
                 processor->SetEnabled(enabled);
             }
+            
+            ImGui::SameLine(ImGui::GetContentRegionAvail().x - 60);
+            if (ImGui::Button("^") && i > 0) {
+                m_coordinator->GetPipeline().MoveProcessorUp(i);
+                ImGui::PopID();
+                break; // Stop rendering this frame to avoid iterator issues
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("v") && i < processors.size() - 1) {
+                m_coordinator->GetPipeline().MoveProcessorDown(i);
+                ImGui::PopID();
+                break; // Stop rendering this frame
+            }
+            
+            if (enabled) {
+                ImGui::Indent();
+                processor->DrawConfigUI();
+                ImGui::Unindent();
+            }
+            ImGui::PopID();
         }
     }
 
     ImGui::Checkbox("Auto-refresh Heatmap", &m_autoRefresh);
     ImGui::Checkbox("Fullscreen Heatmap", &m_fullscreen);
     ImGui::SliderInt("Heatmap Scale", &m_heatmapScale, 1, 30);
+    ImGui::SliderFloat("Color Max Range", &m_colorRange, 100.0f, 10000.0f, "%.0f");
     
     ImGui::End();
 }
@@ -146,16 +189,25 @@ void DiagnosticUI::DrawHeatmap() {
             // Mirror Matrix: Left becomes Right, Top becomes Bottom
             int16_t val = m_currentFrame.heatmapMatrix[rows - 1 - y][cols - 1 - x];
             
-            // 值映射 (假设正常触摸引起的电容变化(delta)范围在 0 ~ 2000 左右)
-            // 你可以根据实际数值调整这个比例
-            float normalized = std::clamp(val / 1000.0f, 0.0f, 1.0f);
+            // 值映射 (使用用户界面可调的最大量程)
+            float normalized = std::clamp(val / m_colorRange, 0.0f, 1.0f);
             
-            // 冷暖色调映射 (深蓝 -> 绿 -> 黄 -> 红)
+            // 使用更平滑的多段插值 (如 Jet 或 Turbo 极简近似映射) 替代简单的 4 段线性插值
+            // 这将最大化利用 ImU32 的 8位单通道精度 (共约 1677 万色)
             ImVec4 colorVec;
-            if (normalized < 0.25f) colorVec = ImVec4(0, 0, normalized * 4.0f, 1.0f);
-            else if (normalized < 0.5f) colorVec = ImVec4(0, (normalized - 0.25f) * 4.0f, 1.0f - (normalized - 0.25f) * 4.0f, 1.0f);
-            else if (normalized < 0.75f) colorVec = ImVec4((normalized - 0.5f) * 4.0f, 1.0f, 0, 1.0f);
-            else colorVec = ImVec4(1.0f, 1.0f - (normalized - 0.75f) * 4.0f, 0, 1.0f);
+            if (normalized <= 0.0f) {
+                // Background Base Noise -> Absolute Black
+                colorVec = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
+            } else {
+                float r = 0.0f, g = 0.0f, b = 0.0f;
+                // Jet Colormap Approximation
+                // normalized: (0, 1]
+                float fourValue = 4.0f * normalized;
+                r = std::clamp(std::min(fourValue - 1.5f, -fourValue + 4.5f), 0.0f, 1.0f);
+                g = std::clamp(std::min(fourValue - 0.5f, -fourValue + 3.5f), 0.0f, 1.0f);
+                b = std::clamp(std::min(fourValue + 0.5f, -fourValue + 2.5f), 0.0f, 1.0f);
+                colorVec = ImVec4(r, g, b, 1.0f);
+            }
             
             ImU32 color = ImGui::ColorConvertFloat4ToU32(colorVec);
             
@@ -175,6 +227,142 @@ void DiagnosticUI::DrawHeatmap() {
     }
     
     ImGui::End();
+}
+
+void DiagnosticUI::DrawCoordinateTable() {
+    ImGui::Begin("Parsed Coordinates");
+
+    if (m_currentFrame.contacts.empty()) {
+        ImGui::Text("No touches detected.");
+    } else {
+        if (ImGui::BeginTable("ContactsTable", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
+            ImGui::TableSetupColumn("ID", ImGuiTableColumnFlags_WidthFixed, 40.0f);
+            ImGui::TableSetupColumn("X (Sub-pixel)", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Y (Sub-pixel)", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Peak Intensity", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+            ImGui::TableHeadersRow();
+
+            for (const auto& contact : m_currentFrame.contacts) {
+                ImGui::TableNextRow();
+                
+                ImGui::TableSetColumnIndex(0);
+                ImGui::Text("%d", contact.id);
+
+                ImGui::TableSetColumnIndex(1);
+                ImGui::Text("%.4f", contact.x);
+
+                ImGui::TableSetColumnIndex(2);
+                ImGui::Text("%.4f", contact.y);
+
+                ImGui::TableSetColumnIndex(3);
+                ImGui::Text("%d", contact.area);
+            }
+            ImGui::EndTable();
+        }
+    }
+
+    ImGui::End();
+}
+
+void DiagnosticUI::DrawMasterSuffixTable() {
+    ImGui::Begin("Master Frame Suffix (128 words)");
+    if (m_currentFrame.rawData.size() >= 5063) {
+        if (ImGui::BeginTable("MasterSuffixTable", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
+            const uint8_t* ptr = m_currentFrame.rawData.data() + 4807;
+            for (int i = 0; i < 128; ++i) {
+                if (i % 8 == 0) ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(i % 8);
+                uint16_t val = static_cast<uint16_t>(ptr[i * 2] | (ptr[i * 2 + 1] << 8));
+                ImGui::Text("[%03d]: %04X (%5d)", i, val, val);
+            }
+            ImGui::EndTable();
+        }
+    } else {
+        ImGui::Text("Insufficient frame data length.");
+    }
+    ImGui::End();
+}
+
+void DiagnosticUI::DrawSlaveSuffixTable() {
+    ImGui::Begin("Slave Frame Suffix (166 words)");
+    if (m_currentFrame.rawData.size() >= 5402) { // 5063 + 339 = 5402
+        if (ImGui::BeginTable("SlaveSuffixTable", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
+            const uint8_t* ptr = m_currentFrame.rawData.data() + 5070; // 5063 + 7
+            for (int i = 0; i < 166; ++i) {
+                if (i % 8 == 0) ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(i % 8);
+                uint16_t val = static_cast<uint16_t>(ptr[i * 2] | (ptr[i * 2 + 1] << 8));
+                ImGui::Text("[%03d]: %04X (%5d)", i, val, val);
+            }
+            ImGui::EndTable();
+        }
+    } else {
+        ImGui::Text("Insufficient slave overlay data length.");
+    }
+    ImGui::End();
+}
+
+void DiagnosticUI::ExportCurrentFrameToCSV() {
+    auto now = std::chrono::system_clock::now();
+    std::time_t time_now = std::chrono::system_clock::to_time_t(now);
+    std::tm* tm_now = std::localtime(&time_now);
+    
+    std::ostringstream filename;
+    filename << "heatmap_" 
+             << std::put_time(tm_now, "%Y%m%d_%H%M%S") << "_" 
+             << (m_currentFrame.timestamp % 1000) 
+             << ".csv";
+
+    std::ofstream out(filename.str());
+    if (!out.is_open()) {
+        LOG_INFO("App", "DiagnosticUI::ExportCurrentFrameToCSV", "Error", "Failed to open file for writing.");
+        return;
+    }
+
+    out << "--- EGoTouch Frame Export ---\n";
+    out << "Timestamp: " << m_currentFrame.timestamp << "\n\n";
+
+    out << "--- Heatmap (40 rows x 60 cols) ---\n";
+    for (int y = 0; y < 40; ++y) {
+        for (int x = 0; x < 60; ++x) {
+            out << m_currentFrame.heatmapMatrix[y][x];
+            if (x < 59) out << ",";
+        }
+        out << "\n";
+    }
+
+    out << "\n--- Master Frame Suffix (128 words) ---\n";
+    if (m_currentFrame.rawData.size() >= 5063) {
+        const uint8_t* ptr = m_currentFrame.rawData.data() + 4807;
+        for (int i = 0; i < 128; ++i) {
+            uint16_t val = static_cast<uint16_t>(ptr[i * 2] | (ptr[i * 2 + 1] << 8));
+            out << val;
+            if (i < 127) {
+                out << (((i + 1) % 16 == 0) ? "\n" : ",");
+            }
+        }
+        out << "\n";
+    } else {
+        out << "Data unavailable\n";
+    }
+
+    out << "\n--- Slave Frame Suffix (166 words) ---\n";
+    if (m_currentFrame.rawData.size() >= 5402) {
+        const uint8_t* ptr = m_currentFrame.rawData.data() + 5070;
+        for (int i = 0; i < 166; ++i) {
+            uint16_t val = static_cast<uint16_t>(ptr[i * 2] | (ptr[i * 2 + 1] << 8));
+            out << val;
+            if (i < 165) {
+                out << (((i + 1) % 16 == 0) ? "\n" : ",");
+            }
+        }
+        out << "\n";
+    } else {
+        out << "Data unavailable\n";
+    }
+
+    out.close();
+    LOG_INFO("App", "DiagnosticUI::ExportCurrentFrameToCSV", "UI", "Frame exported to {}", filename.str());
 }
 
 } // namespace App

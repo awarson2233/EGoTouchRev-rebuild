@@ -36,6 +36,16 @@ public:
     void SetAcquisitionActive(bool active) { m_isAcquiring.store(active); }
     bool IsAcquisitionActive() const { return m_isAcquiring.load(); }
 
+    /**
+     * @brief 触发回放数据导出 (Replay/DVR Export)
+     * 
+     * 该功能实现“时间溯源”式的回放：
+     * 系统在后台自动维护一个环形缓冲区（Rolling Buffer），循环记录最新的 120 帧（约 2 秒历史）。
+     * 当用户发现特定异常场景时（如：断线、跳动），点击导出按钮可将缓存中的原始热力图及
+     * 算法处理后的坐标点完整序列快照导出为 CSV 文件，用于离线算法回放与精度复现。
+     */
+    void TriggerDVRExport();
+
 private:
     void AcquisitionThreadFunc();
     void ProcessingThreadFunc();
@@ -62,6 +72,9 @@ private:
     // GUI needs the latest frame synchronously
     std::mutex m_latestFrameMutex;
     Engine::HeatmapFrame m_latestFrame;
+
+    // Time Backtrack (DVR) rolling buffer
+    RingBuffer<Engine::HeatmapFrame, 120> m_dvrBuffer;
 };
 
 } // namespace App

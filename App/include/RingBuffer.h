@@ -29,6 +29,29 @@ public:
         return true;
     }
 
+    void PushOverwriting(const T& item) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_buffer[m_tail] = item;
+        m_tail = (m_tail + 1) % Capacity;
+        if (m_count < Capacity) {
+            ++m_count;
+        } else {
+            // Overwriting oldest: increment head as well
+            m_head = (m_head + 1) % Capacity;
+        }
+        m_cv.notify_one();
+    }
+
+    std::vector<T> GetSnapshot() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        std::vector<T> snapshot;
+        snapshot.reserve(m_count);
+        for (size_t i = 0; i < m_count; ++i) {
+            snapshot.push_back(m_buffer[(m_head + i) % Capacity]);
+        }
+        return snapshot;
+    }
+
     bool Pop(T& outItem) {
         std::unique_lock<std::mutex> lock(m_mutex);
         if (m_count == 0) {

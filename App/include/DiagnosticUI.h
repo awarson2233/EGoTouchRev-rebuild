@@ -1,7 +1,6 @@
 #pragma once
 
 #include "Coordinator.h"
-#include <vector>
 
 namespace App {
 
@@ -17,6 +16,11 @@ public:
 private:
     void DrawControlPanel();
     void DrawHeatmap();
+    void DrawCoordinateTable();
+    void DrawMasterSuffixTable();
+    void DrawSlaveSuffixTable();
+
+    void ExportCurrentFrameToCSV();
 
 private:
     Coordinator* m_coordinator;
@@ -28,6 +32,7 @@ private:
     bool m_autoRefresh = true;
     bool m_fullscreen = false;
     int m_heatmapScale = 10;
+    float m_colorRange = 1000.0f;
 };
 
 } // namespace App

@@ -1,5 +1,10 @@
 #include "Coordinator.h"
 #include "Logger.h"
+#include "DynamicDeadzoneFilter.h"
+#include "SignalConditioningFilter.h"
+#include "GaussianFilter.h"
+#include "SpatialSharpenFilter.h"
+#include "CentroidExtractor.h"
 #include <chrono>
 
 namespace App {
@@ -17,6 +22,12 @@ Coordinator::Coordinator() {
     // Initialise Engine Pipeline
     m_pipeline.AddProcessor(std::make_unique<Engine::MasterFrameParser>());
     m_pipeline.AddProcessor(std::make_unique<Engine::BaselineSubtraction>());
+    m_pipeline.AddProcessor(std::make_unique<Engine::DynamicDeadzoneFilter>());
+    m_pipeline.AddProcessor(std::make_unique<Engine::SignalConditioningFilter>());
+    m_pipeline.AddProcessor(std::make_unique<Engine::GaussianFilter>());
+    // Unsharp masking filter to separate highly merged fingers *before* extraction
+    m_pipeline.AddProcessor(std::make_unique<Engine::SpatialSharpenFilter>());
+    m_pipeline.AddProcessor(std::make_unique<Engine::CentroidExtractor>());
 }
 
 Coordinator::~Coordinator() {
@@ -99,6 +110,9 @@ void Coordinator::ProcessingThreadFunc() {
                     m_latestFrame = frame;
                 }
 
+                // Push to DVR buffer (automatically overwrites old frames)
+                m_dvrBuffer.PushOverwriting(frame);
+
                 // TODO: (Stage 3) 交给 Host::VhfInjector 发送 HID Report
             }
         }
@@ -113,6 +127,57 @@ void Coordinator::SystemStateThreadFunc() {
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     }
     LOG_INFO("App", "Coordinator::SystemStateThreadFunc", "Unknown", "SystemState Thread stopped.");
+}
+
+void Coordinator::TriggerDVRExport() {
+    auto snapshot = m_dvrBuffer.GetSnapshot();
+    if (snapshot.empty()) {
+        LOG_WARN("App", "Coordinator::TriggerDVRExport", "Unknown", "DVR buffer is empty, nothing to export.");
+        return;
+    }
+
+    auto now = std::chrono::system_clock::now();
+    auto time_t_now = std::chrono::system_clock::to_time_t(now);
+    struct tm time_info;
+    localtime_s(&time_info, &time_t_now);
+
+    char filename[128];
+    sprintf_s(filename, "dvr_backtrack_%04d%02d%02d_%02d%02d%02d.csv",
+              time_info.tm_year + 1900, time_info.tm_mon + 1, time_info.tm_mday,
+              time_info.tm_hour, time_info.tm_min, time_info.tm_sec);
+
+    FILE* fp = nullptr;
+    fopen_s(&fp, filename, "w");
+    if (!fp) {
+        LOG_ERROR("App", "Coordinator::TriggerDVRExport", "Unknown", "Failed to create DVR export file: %s", filename);
+        return;
+    }
+
+    LOG_INFO("App", "Coordinator::TriggerDVRExport", "Unknown", "Exporting %zu frames to %s...", snapshot.size(), filename);
+
+    for (size_t i = 0; i < snapshot.size(); ++i) {
+        const auto& f = snapshot[i];
+        fprintf(fp, "--- Frame [%zu] --- TS: %llu\n", i, f.timestamp);
+        
+        // Heatmap
+        for (int y = 0; y < 40; ++y) {
+            for (int x = 0; x < 60; ++x) {
+                fprintf(fp, "%d%s", f.heatmapMatrix[y][x], (x == 59 ? "" : ","));
+            }
+            fprintf(fp, "\n");
+        }
+
+        // Contacts
+        fprintf(fp, "Contacts: %zu\n", f.contacts.size());
+        for (const auto& c : f.contacts) {
+            fprintf(fp, "ID:%d, X:%.3f, Y:%.3f, State:%d, Area:%d\n", 
+                    c.id, c.x, c.y, c.state, c.area);
+        }
+        fprintf(fp, "\n");
+    }
+
+    fclose(fp);
+    LOG_INFO("App", "Coordinator::TriggerDVRExport", "Unknown", "DVR Export Complete: %s", filename);
 }
 
 } // namespace App

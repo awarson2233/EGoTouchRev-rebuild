@@ -18,6 +18,18 @@ void FramePipeline::RemoveProcessor(const std::string& name) {
         m_processors.end());
 }
 
+void FramePipeline::MoveProcessorUp(size_t index) {
+    if (index > 0 && index < m_processors.size()) {
+        std::swap(m_processors[index], m_processors[index - 1]);
+    }
+}
+
+void FramePipeline::MoveProcessorDown(size_t index) {
+    if (index >= 0 && index + 1 < m_processors.size()) {
+        std::swap(m_processors[index], m_processors[index + 1]);
+    }
+}
+
 bool FramePipeline::Execute(HeatmapFrame& frame) {
     for (auto& processor : m_processors) {
         if (!processor->Process(frame)) {
